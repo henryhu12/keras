@@ -253,6 +253,10 @@ def vectorized_map(function, elements):
     return jax.vmap(function)(elements)
 
 
+def map(f, xs):
+    return jax.lax.map(f, xs)
+
+
 def scan(f, init, xs=None, length=None, reverse=False, unroll=1):
     if not isinstance(unroll, bool):
         if not isinstance(unroll, int) or unroll < 1:
@@ -263,6 +267,10 @@ def scan(f, init, xs=None, length=None, reverse=False, unroll=1):
     return jax.lax.scan(
         f, init=init, xs=xs, length=length, reverse=reverse, unroll=unroll
     )
+
+
+def associative_scan(f, elems, reverse=False, axis=0):
+    return jax.lax.associative_scan(f, elems, reverse, axis)
 
 
 def scatter(indices, values, shape):
@@ -340,6 +348,11 @@ def unstack(x, num=None, axis=0):
         jax.lax.index_in_dim(x, i, axis, keepdims=False)
         for i in range(x.shape[axis])
     ]
+
+
+def random_seed_dtype():
+    # jax random seed uses uint32.
+    return "uint32"
 
 
 def custom_gradient(fun):

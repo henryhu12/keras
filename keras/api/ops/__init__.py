@@ -8,13 +8,16 @@ from keras.api.ops import image
 from keras.api.ops import linalg
 from keras.api.ops import nn
 from keras.api.ops import numpy
+from keras.src.ops.core import associative_scan
 from keras.src.ops.core import cast
 from keras.src.ops.core import cond
 from keras.src.ops.core import convert_to_numpy
 from keras.src.ops.core import convert_to_tensor
 from keras.src.ops.core import custom_gradient
+from keras.src.ops.core import dtype
 from keras.src.ops.core import fori_loop
 from keras.src.ops.core import is_tensor
+from keras.src.ops.core import map
 from keras.src.ops.core import scan
 from keras.src.ops.core import scatter
 from keras.src.ops.core import scatter_update
@@ -196,6 +199,7 @@ from keras.src.ops.numpy import repeat
 from keras.src.ops.numpy import reshape
 from keras.src.ops.numpy import roll
 from keras.src.ops.numpy import round
+from keras.src.ops.numpy import searchsorted
 from keras.src.ops.numpy import select
 from keras.src.ops.numpy import sign
 from keras.src.ops.numpy import sin

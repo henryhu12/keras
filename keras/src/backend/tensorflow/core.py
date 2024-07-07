@@ -1,4 +1,7 @@
+import builtins
+
 import numpy as np
+import optree
 import tensorflow as tf
 from tensorflow.compiler.tf2xla.python.xla import dynamic_update_slice
 
@@ -6,6 +9,7 @@ from keras.src import tree
 from keras.src.backend.common import KerasVariable
 from keras.src.backend.common import global_state
 from keras.src.backend.common import standardize_dtype
+from keras.src.backend.common.backend_utils import slice_along_axis
 from keras.src.backend.common.keras_tensor import KerasTensor
 from keras.src.backend.common.name_scope import name_scope as base_name_scope
 from keras.src.backend.common.stateless_scope import StatelessScope
@@ -218,6 +222,17 @@ def vectorized_map(function, elements):
     return tf.vectorized_map(function, elements)
 
 
+def map(f, xs):
+    xs = tree.map_structure(convert_to_tensor, xs)
+
+    def get_fn_output_signature(x):
+        out = f(x)
+        return tree.map_structure(tf.TensorSpec.from_tensor, out)
+
+    fn_output_signature = get_fn_output_signature(xs[0])
+    return tf.map_fn(f, xs, fn_output_signature=fn_output_signature)
+
+
 def scan(f, init, xs=None, length=None, reverse=False, unroll=1):
     # We have reimplemented `scan` to match the behavior of `jax.lax.scan`
     # Ref: tf.scan, jax.lax.scan
@@ -339,6 +354,185 @@ def scan(f, init, xs=None, length=None, reverse=False, unroll=1):
     return pack_output(carry_flat), pack_output(ys_flat)
 
 
+def associative_scan(f, elems, reverse=False, axis=0):
+    # Implementation is the same as tfp.math.scan_associative
+    # with additional checks to ensure similar behavior with jax
+    if not callable(f):
+        raise TypeError(f"`f` should be a callable. Received: f={f}")
+    elems_flat, treespec = optree.tree_flatten(elems)
+    elems_flat = [tf.convert_to_tensor(elem) for elem in elems_flat]
+    if reverse:
+        elems_flat = [tf.reverse(elem, [axis]) for elem in elems_flat]
+
+    def _combine(a_flat, b_flat):
+        a = optree.tree_unflatten(treespec, a_flat)
+        b = optree.tree_unflatten(treespec, b_flat)
+        c = f(a, b)
+        c_flat, _ = optree.tree_flatten(c)
+        return c_flat
+
+    def _get_dim(x):
+        return shape(x)[axis]
+
+    # TODO add constant dim check
+    num_elems = _get_dim(elems_flat[0])
+    if not all(_get_dim(elem) == num_elems for elem in elems_flat[1:]):
+        raise ValueError(
+            "Array inputs to associative_scan must have the same "
+            "first dimension. (saw: {})".format(
+                [tf.shape(elem) for elem in elems_flat]
+            )
+        )
+
+    def _interleave(a, b, axis):
+        # [a b c ...] [d e f ...] -> [a d b e c f ...]
+        num_elems_a = _get_dim(a)
+        num_elems_b = _get_dim(b)
+
+        # Note that interleaving implies rank(a)==rank(b).
+        axis = tf.where(axis >= 0, axis, tf.rank(a) + axis)
+        axis = (
+            int(axis)  # Avoid ndarray values.
+            if tf.get_static_value(axis) is not None
+            else axis
+        )
+
+        def _interleave_with_b(a):
+            return tf.reshape(
+                # Work around lack of support for Tensor axes in
+                # `tf.stack` by using `concat` and `expand_dims` instead.
+                tf.concat(
+                    [
+                        tf.expand_dims(a, axis=axis + 1),
+                        tf.expand_dims(b, axis=axis + 1),
+                    ],
+                    axis=axis + 1,
+                ),
+                tf.concat(
+                    [
+                        a.get_shape()[:axis],
+                        [2 * num_elems_b],
+                        a.get_shape()[axis + 1 :],
+                    ],
+                    axis=0,
+                ),
+            )
+
+        return tf.cond(
+            tf.equal(num_elems_a, num_elems_b + 1),
+            lambda: tf.concat(
+                [
+                    _interleave_with_b(
+                        slice_along_axis(a, None, -1, axis=axis)
+                    ),
+                    slice_along_axis(a, -1, None, axis=axis),
+                ],
+                axis=axis,
+            ),
+            lambda: _interleave_with_b(a),
+        )
+
+    def _scan(elems):
+        elem_length = _get_dim(elems[0])
+        a = [slice_along_axis(elem, 0, -1, step=2, axis=axis) for elem in elems]
+        b = [
+            slice_along_axis(elem, 1, None, step=2, axis=axis) for elem in elems
+        ]
+        reduced_elems = _combine(a, b)
+
+        def _handle_base_case_elem_length_two():
+            return [
+                tf.concat(
+                    [slice_along_axis(elem, 0, 1, axis=axis), reduced_elem],
+                    axis=axis,
+                )
+                for (reduced_elem, elem) in zip(reduced_elems, elems)
+            ]
+
+        def _handle_base_case_elem_length_three():
+            reduced_reduced_elems = _combine(
+                reduced_elems,
+                [slice_along_axis(elem, 2, 3, axis=axis) for elem in elems],
+            )
+            return [
+                tf.concat(
+                    [
+                        slice_along_axis(elem, 0, 1, axis=axis),
+                        reduced_elem,
+                        reduced_reduced_elem,
+                    ],
+                    axis=axis,
+                )
+                for (reduced_reduced_elem, reduced_elem, elem) in zip(
+                    reduced_reduced_elems, reduced_elems, elems
+                )
+            ]
+
+        at_base_case = tf.logical_or(
+            tf.equal(elem_length, 2), tf.equal(elem_length, 3)
+        )
+
+        def _base_case():
+            return tf.cond(
+                tf.equal(elem_length, 2),
+                _handle_base_case_elem_length_two,
+                _handle_base_case_elem_length_three,
+            )
+
+        def _recursive_case():
+
+            odd_elems = _scan(reduced_elems)
+
+            def _even_length_case():
+                return _combine(
+                    [
+                        slice_along_axis(odd_elem, 0, -1, axis=axis)
+                        for odd_elem in odd_elems
+                    ],
+                    [
+                        slice_along_axis(elem, 2, None, 2, axis=axis)
+                        for elem in elems
+                    ],
+                )
+
+            def _odd_length_case():
+                return _combine(
+                    [odd_elem for odd_elem in odd_elems],
+                    [
+                        slice_along_axis(elem, 2, None, 2, axis=axis)
+                        for elem in elems
+                    ],
+                )
+
+            results = tf.cond(
+                tf.equal(elem_length % 2, 0),
+                _even_length_case,
+                _odd_length_case,
+            )
+
+            even_elems = [
+                tf.concat(
+                    [slice_along_axis(elem, 0, 1, axis=axis), result], axis=axis
+                )
+                for (elem, result) in zip(elems, results)
+            ]
+            return list(
+                builtins.map(
+                    lambda a, b: _interleave(a, b, axis=axis),
+                    even_elems,
+                    odd_elems,
+                )
+            )
+
+        return tf.cond(at_base_case, _base_case, _recursive_case)
+
+    scans = _scan(elems_flat)
+    if reverse:
+        scans = [tf.reverse(scanned, [axis]) for scanned in scans]
+
+    return optree.tree_unflatten(treespec, scans)
+
+
 def scatter(indices, values, shape):
     return tf.scatter_nd(indices, values, shape)
 
@@ -404,6 +598,11 @@ def stop_gradient(variable):
 
 def unstack(x, num=None, axis=0):
     return tf.unstack(x, num=num, axis=axis)
+
+
+def random_seed_dtype():
+    # tensorflow random operation only works on int32/int64, not uint32.
+    return "int64"
 
 
 def custom_gradient(fun):

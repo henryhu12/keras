@@ -391,6 +391,41 @@ class RandomTest(testing.TestCase, parameterized.TestCase):
             )
 
 
+class RandomBehaviorTest(testing.TestCase, parameterized.TestCase):
+    def test_beta_tf_data_compatibility(self):
+        import tensorflow as tf
+
+        from keras.src.layers.preprocessing.tf_data_layer import TFDataLayer
+        from keras.src.random.seed_generator import SeedGenerator
+
+        class BetaLayer(TFDataLayer):
+            def __init__(self, seed=None, **kwargs):
+                super().__init__(**kwargs)
+                self.seed = seed
+                self.generator = SeedGenerator(seed)
+
+            def compute_output_shape(self, input_shape):
+                return input_shape
+
+            def call(self, inputs):
+                seed_generator = self._get_seed_generator(self.backend._backend)
+                noise = self.backend.random.beta(
+                    self.backend.shape(inputs),
+                    alpha=0.5,
+                    beta=0.5,
+                    seed=seed_generator,
+                )
+                inputs = inputs + noise
+                return inputs
+
+        layer = BetaLayer()
+        input_data = np.random.random([2, 4, 4, 3])
+        ds = tf.data.Dataset.from_tensor_slices(input_data).batch(2).map(layer)
+        for output in ds.take(1):
+            output = ops.convert_to_numpy(output)
+        self.assertEqual(output.shape, (2, 4, 4, 3))
+
+
 class RandomDTypeTest(testing.TestCase, parameterized.TestCase):
     INT_DTYPES = [x for x in dtypes.INT_TYPES if x != "uint64"]
     FLOAT_DTYPES = dtypes.FLOAT_TYPES
