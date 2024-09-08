@@ -2088,7 +2088,7 @@ class NumpyOneInputOpsStaticShapeTest(testing.TestCase):
             knp.argpartition(x, (1, 3))
 
 
-class NumpyTwoInputOpsCorretnessTest(testing.TestCase, parameterized.TestCase):
+class NumpyTwoInputOpsCorrectnessTest(testing.TestCase, parameterized.TestCase):
     def test_add(self):
         x = np.array([[1, 2, 3], [3, 2, 1]])
         y = np.array([[4, 5, 6], [3, 2, 1]])
@@ -4475,6 +4475,11 @@ class NumpyOneInputOpsCorrectnessTest(testing.TestCase, parameterized.TestCase):
         out = knp.slogdet(x)
         self.assertEqual(out[0].shape, ())
         self.assertEqual(out[1].shape, ())
+
+        x = backend.KerasTensor((2, 4, 3, 3))
+        out = knp.slogdet(x)
+        self.assertEqual(out[0].shape, ())
+        self.assertEqual(out[1].shape, (2, 4))
 
     def test_nan_to_num(self):
         x = knp.array([1.0, np.nan, np.inf, -np.inf])
