@@ -43,7 +43,7 @@ class TestCase(unittest.TestCase):
             x1 = backend.convert_to_numpy(x1)
         if not isinstance(x2, np.ndarray):
             x2 = backend.convert_to_numpy(x2)
-        np.testing.assert_allclose(x1, x2, atol=atol, rtol=rtol)
+        np.testing.assert_allclose(x1, x2, atol=atol, rtol=rtol, err_msg=msg)
 
     def assertNotAllClose(self, x1, x2, atol=1e-6, rtol=1e-6, msg=None):
         try:
@@ -62,7 +62,7 @@ class TestCase(unittest.TestCase):
             x1 = backend.convert_to_numpy(x1)
         if not isinstance(x2, np.ndarray):
             x2 = backend.convert_to_numpy(x2)
-        np.testing.assert_almost_equal(x1, x2, decimal=decimal)
+        np.testing.assert_almost_equal(x1, x2, decimal=decimal, err_msg=msg)
 
     def assertAllEqual(self, x1, x2, msg=None):
         self.assertEqual(len(x1), len(x2), msg=msg)
@@ -616,7 +616,11 @@ class TestCase(unittest.TestCase):
                     tree.flatten(output_data), tree.flatten(output_spec)
                 ):
                     dtype = standardize_dtype(tensor.dtype)
-                    self.assertEqual(dtype, spec.dtype)
+                    self.assertEqual(
+                        dtype,
+                        spec.dtype,
+                        f"expected output dtype {spec.dtype}, got {dtype}",
+                    )
                 for weight in layer.weights:
                     dtype = standardize_dtype(weight.dtype)
                     if is_float_dtype(dtype):
