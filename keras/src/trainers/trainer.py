@@ -1,4 +1,3 @@
-import concurrent.futures
 import inspect
 import platform
 import warnings
@@ -968,15 +967,15 @@ class Trainer:
 
     def _pythonify_logs(self, logs):
         result = {}
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            for key, value in sorted(logs.items()):
-                if isinstance(value, dict):
-                    result.update(self._pythonify_logs(value))
-                else:
-                    future_value = executor.submit(_async_float_cast, value)
-                result[key] = future_value
-        for key, future_value in result.items():
-            result[key] = future_value.result()
+        for key, value in sorted(logs.items()):
+            if isinstance(value, dict):
+                result.update(self._pythonify_logs(value))
+            else:
+                try:
+                    value = float(value)
+                except:
+                    pass
+                result[key] = value
         return result
 
     def _get_metrics_result_or_logs(self, logs):
@@ -1125,11 +1124,3 @@ def model_supports_jit(model):
     if all(x.supports_jit for x in model._flatten_layers()):
         return True
     return False
-
-
-def _async_float_cast(value):
-    try:
-        value = float(value)
-    except:
-        pass
-    return value

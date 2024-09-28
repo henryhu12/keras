@@ -2,6 +2,7 @@ import copy
 import inspect
 import typing
 
+from keras.src import backend
 from keras.src import tree
 from keras.src.api_export import keras_export
 from keras.src.backend.common import global_state
@@ -226,10 +227,7 @@ class Sequential(Model):
             outputs = layer(inputs, **kwargs)
             inputs = outputs
 
-            def _get_mask_from_keras_tensor(kt):
-                return getattr(kt, "_keras_mask", None)
-
-            mask = tree.map_structure(_get_mask_from_keras_tensor, outputs)
+            mask = tree.map_structure(backend.get_keras_mask, outputs)
         return outputs
 
     @property
@@ -241,6 +239,13 @@ class Sequential(Model):
         if layers and isinstance(layers[0], InputLayer):
             return layers[1:]
         return layers[:]
+
+    @layers.setter
+    def layers(self, _):
+        raise AttributeError(
+            "`Sequential.layers` attribute is reserved and should not be used. "
+            "Use `add()` and `pop()` to change the layers in this model."
+        )
 
     def compute_output_spec(self, inputs, training=None, mask=None):
         if self._functional:

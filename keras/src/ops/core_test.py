@@ -144,7 +144,7 @@ class CoreOpsStaticShapeTest(testing.TestCase):
             core.unstack(x, axis=axis)
 
 
-class CoreOpsCorrectnessTest(testing.TestCase, parameterized.TestCase):
+class CoreOpsCorrectnessTest(testing.TestCase):
     def test_map(self):
         def f(x):
             return x**2
@@ -565,7 +565,7 @@ class CoreOpsCorrectnessTest(testing.TestCase, parameterized.TestCase):
                 self.b = self.add_weight(shape=(1,), initializer="zeros")
 
             def call(self, x, training=False):
-                return x * ops.stop_gradient(self.w.value) + self.b
+                return x * ops.stop_gradient(self.w) + self.b
 
         model = models.Sequential([ExampleLayer()])
         model.compile(
@@ -863,14 +863,16 @@ class CoreOpsCorrectnessTest(testing.TestCase, parameterized.TestCase):
             self.assertEqual(ops.convert_to_numpy(x.grad), 1.0)
 
 
-class CoreOpsDtypeTest(testing.TestCase, parameterized.TestCase):
+class CoreOpsDtypeTest(testing.TestCase):
     import jax  # enable bfloat16 for numpy
 
     # TODO: Using uint64 will lead to weak type promotion (`float`),
     # resulting in different behavior between JAX and Keras. Currently, we
     # are skipping the test for uint64
     ALL_DTYPES = [
-        x for x in dtypes.ALLOWED_DTYPES if x not in ["string", "uint64"]
+        x
+        for x in dtypes.ALLOWED_DTYPES
+        if x not in ["string", "uint64", "complex64", "complex128"]
     ] + [None]
 
     if backend.backend() == "torch":

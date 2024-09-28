@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 
 import numpy as np
+from absl.testing import parameterized
 
 from keras.src import backend
 from keras.src import distribution
@@ -19,7 +20,7 @@ from keras.src.models import Model
 from keras.src.utils import traceback_utils
 
 
-class TestCase(unittest.TestCase):
+class TestCase(parameterized.TestCase, unittest.TestCase):
     maxDiff = None
 
     def __init__(self, *args, **kwargs):
@@ -58,6 +59,7 @@ class TestCase(unittest.TestCase):
         )
 
     def assertAlmostEqual(self, x1, x2, decimal=3, msg=None):
+        msg = msg or ""
         if not isinstance(x1, np.ndarray):
             x1 = backend.convert_to_numpy(x1)
         if not isinstance(x2, np.ndarray):

@@ -120,7 +120,7 @@ def _get_variable_value_by_path(variables, path):
 
 
 @pytest.mark.requires_trainable_backend
-class ModelTest(testing.TestCase, parameterized.TestCase):
+class ModelTest(testing.TestCase):
     def test_functional_rerouting(self):
         model = _get_model()
         self.assertIsInstance(model, Functional)
@@ -382,6 +382,49 @@ class ModelTest(testing.TestCase, parameterized.TestCase):
                 "output_a_weighted_mean_squared_error",
                 "output_b_accuracy",
                 "output_b_loss",
+                "output_b_mean_squared_error",
+                "output_b_weighted_accuracy",
+                "output_b_weighted_mean_squared_error",
+            ]
+        )
+        self.assertListEqual(hist_keys, ref_keys)
+
+    def test_functional_dict_outputs_dict_losses_with_undefined_loss(self):
+        model = _get_model_multi_outputs_dict()
+        self.assertIsInstance(model, Functional)
+        x = np.random.rand(8, 3)
+        y1 = np.random.rand(8, 1)
+        y2 = np.random.randint(0, 2, (8, 1))
+        model.compile(
+            optimizer="sgd",
+            loss={
+                "output_b": ["binary_crossentropy"],
+            },
+            metrics={
+                "output_b": ["mean_squared_error", "accuracy"],
+            },
+            weighted_metrics={
+                "output_b": ["mean_squared_error", "accuracy"],
+            },
+        )
+        # Check dict outputs.
+        outputs = model.predict(x)
+        self.assertIsInstance(outputs, dict)
+        self.assertEqual(outputs["output_a"].shape, (8, 1))
+        self.assertEqual(outputs["output_b"].shape, (8, 1))
+        # Fit the model to make sure compile_metrics are built
+        hist = model.fit(
+            x,
+            {"output_a": y1, "output_b": y2},
+            batch_size=2,
+            epochs=1,
+            verbose=0,
+        )
+        hist_keys = sorted(hist.history.keys())
+        ref_keys = sorted(
+            [
+                "loss",
+                "output_b_accuracy",
                 "output_b_mean_squared_error",
                 "output_b_weighted_accuracy",
                 "output_b_weighted_mean_squared_error",
@@ -876,3 +919,10 @@ class ModelTest(testing.TestCase, parameterized.TestCase):
             "The following variable path is found twice in the model",
         ):
             model.get_state_tree()
+
+    def test_layers_setter(self):
+        model = Model()
+        with self.assertRaisesRegex(
+            AttributeError, "`Model.layers` attribute is reserved"
+        ):
+            model.layers = [layers.Dense(4)]

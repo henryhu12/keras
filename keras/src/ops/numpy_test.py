@@ -2096,7 +2096,7 @@ class NumpyOneInputOpsStaticShapeTest(testing.TestCase):
             knp.argpartition(x, (1, 3))
 
 
-class NumpyTwoInputOpsCorrectnessTest(testing.TestCase, parameterized.TestCase):
+class NumpyTwoInputOpsCorrectnessTest(testing.TestCase):
     def test_add(self):
         x = np.array([[1, 2, 3], [3, 2, 1]])
         y = np.array([[4, 5, 6], [3, 2, 1]])
@@ -3015,7 +3015,7 @@ class NumpyTwoInputOpsCorrectnessTest(testing.TestCase, parameterized.TestCase):
         )
 
 
-class NumpyOneInputOpsCorrectnessTest(testing.TestCase, parameterized.TestCase):
+class NumpyOneInputOpsCorrectnessTest(testing.TestCase):
     def test_mean(self):
         x = np.array([[1, 2, 3], [3, 2, 1]])
         self.assertAllClose(knp.mean(x), np.mean(x))
@@ -4761,7 +4761,7 @@ def snake_to_pascal_case(name):
     not backend.SUPPORTS_SPARSE_TENSORS,
     reason="Backend does not support sparse tensors.",
 )
-class SparseTest(testing.TestCase, parameterized.TestCase):
+class SparseTest(testing.TestCase):
     DTYPES = ["int32", "float32"]
     DENSIFYING_UNARY_OPS = [
         "arccos",
@@ -5138,14 +5138,16 @@ class SparseTest(testing.TestCase, parameterized.TestCase):
         self.assertAllClose(knp.Divide()(x, y), expected_result)
 
 
-class NumpyDtypeTest(testing.TestCase, parameterized.TestCase):
+class NumpyDtypeTest(testing.TestCase):
     """Test the dtype to verify that the behavior matches JAX."""
 
     # TODO: Using uint64 will lead to weak type promotion (`float`),
     # resulting in different behavior between JAX and Keras. Currently, we
     # are skipping the test for uint64
     ALL_DTYPES = [
-        x for x in dtypes.ALLOWED_DTYPES if x not in ["string", "uint64"]
+        x
+        for x in dtypes.ALLOWED_DTYPES
+        if x not in ["string", "uint64", "complex64", "complex128"]
     ] + [None]
     INT_DTYPES = [x for x in dtypes.INT_TYPES if x != "uint64"]
     FLOAT_DTYPES = dtypes.FLOAT_TYPES
