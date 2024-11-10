@@ -6,6 +6,9 @@ import jax.experimental.sparse as jax_sparse
 import jax.numpy as jnp
 from jax import lax
 from jax import nn as jnn
+from jax.experimental.pallas.ops.tpu import (
+    flash_attention as flash_attention_tpu,
+)
 
 from keras.src import backend
 from keras.src.backend.common.backend_utils import (
@@ -83,6 +86,21 @@ def selu(x):
 def gelu(x, approximate=True):
     x = convert_to_tensor(x)
     return jnn.gelu(x, approximate)
+
+
+def celu(x, alpha=1.0):
+    x = convert_to_tensor(x)
+    return jnn.celu(x, alpha=alpha)
+
+
+def glu(x, axis=-1):
+    x = convert_to_tensor(x)
+    return jnn.glu(x, axis=axis)
+
+
+def hard_tanh(x):
+    x = convert_to_tensor(x)
+    return jnn.hard_tanh(x)
 
 
 def softmax(x, axis=-1):
@@ -599,7 +617,7 @@ def ctc_loss(target, output, target_length, output_length, mask_index=0):
     batch_size, max_label_length = target.shape
     log_epsilon = -1e5
 
-    # Ensure that the dtype promotion behavior matchs that of `tf.nn.ctc_loss`
+    # Ensure that the dtype promotion behavior matches that of `tf.nn.ctc_loss`
     dtype = backend.result_type(output.dtype, "float32")
     output = cast(output, dtype)
 
@@ -1004,7 +1022,18 @@ def dot_product_attention(
             f"Received: query.shape={query.shape}, key.shape={key.shape}, "
             f"value.shape={value.shape}."
         )
-
+    is_tpu = jax.devices()[0].platform == "tpu"
+    if is_tpu and flash_attention:
+        # Use TPU-optimized flash attention from Pallas
+        return flash_attention_tpu(
+            query,
+            key,
+            value,
+            ab=bias,
+            segment_ids=mask,
+            causal=is_causal,
+            sm_scale=scale,
+        )
     # `dot_product_attention` is only available in jax>=0.4.31
     if hasattr(jax.nn, "dot_product_attention"):
         implementation = "cudnn" if flash_attention else "xla"
@@ -1025,7 +1054,6 @@ def dot_product_attention(
             "current JAX version. Please update it "
             "using `pip install -U jax jaxlib`."
         )
-
     # Ref: jax.nn.dot_product_attention
     # https://github.com/jax-ml/jax/blob/jax-v0.4.33/jax/_src/nn/functions.py#L886
     # Not support `query_seq_lengths` and `key_value_seq_lengths` args

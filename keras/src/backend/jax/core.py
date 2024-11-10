@@ -14,6 +14,7 @@ from keras.src.backend.common.symbolic_scope import SymbolicScope
 from keras.src.backend.jax import distribution_lib
 
 SUPPORTS_SPARSE_TENSORS = True
+IS_THREAD_SAFE = True
 
 
 class Variable(KerasVariable):
@@ -152,7 +153,6 @@ def compute_output_spec(fn, *args, **kwargs):
             return x
 
         def wrapped_fn(*args, **kwargs):
-
             # Turn inputs that are sparse to BCOO tensors
             def to_bcoo_if_sparse(x, maybe_symbolic_x):
                 if (

@@ -88,6 +88,21 @@ def gelu(x, approximate=True):
     return tnn.gelu(x)
 
 
+def celu(x, alpha=1.0):
+    x = convert_to_tensor(x)
+    return tnn.celu(x, alpha=alpha)
+
+
+def glu(x, axis=-1):
+    x = convert_to_tensor(x)
+    return tnn.glu(x, dim=axis)
+
+
+def hard_tanh(x):
+    x = convert_to_tensor(x)
+    return tnn.hardtanh(x, min_val=-1.0, max_val=1.0)
+
+
 def softmax(x, axis=-1):
     x = convert_to_tensor(x)
     dtype = backend.standardize_dtype(x.dtype)
@@ -743,7 +758,7 @@ def ctc_loss(
     target_length = convert_to_tensor(target_length)
     output_length = convert_to_tensor(output_length)
 
-    # Ensure that the dtype promotion behavior matchs that of `tf.nn.ctc_loss`
+    # Ensure that the dtype promotion behavior matches that of `tf.nn.ctc_loss`
     dtype = backend.result_type(output.dtype, "float32")
     output = cast(output, dtype)
 
@@ -939,7 +954,14 @@ def dot_product_attention(
                 scale=scale,
             )
     else:
+        if mask is not None:
+            mask = mask.contiguous()
         attention_output = torch.nn.functional.scaled_dot_product_attention(
-            query, key, value, attn_mask=mask, is_causal=is_causal, scale=scale
+            query.contiguous(),
+            key.contiguous(),
+            value.contiguous(),
+            attn_mask=mask,
+            is_causal=is_causal,
+            scale=scale,
         )
     return torch.transpose(attention_output, axis1, axis0)

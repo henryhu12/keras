@@ -18,6 +18,8 @@ from keras.src.backend.tensorflow.sparse import sparse_to_dense
 from keras.src.utils.naming import auto_name
 
 SUPPORTS_SPARSE_TENSORS = True
+# https://github.com/tensorflow/tensorflow/issues/78338
+IS_THREAD_SAFE = False
 
 
 class Variable(
@@ -497,7 +499,6 @@ def associative_scan(f, elems, reverse=False, axis=0):
             )
 
         def _recursive_case():
-
             odd_elems = _scan(reduced_elems)
 
             def _even_length_case():

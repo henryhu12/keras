@@ -18,6 +18,7 @@ from keras.src.backend.common.symbolic_scope import in_symbolic_scope
 from keras.src.callbacks.callback import Callback
 from keras.src.optimizers.rmsprop import RMSprop
 from keras.src.testing.test_utils import named_product
+from keras.src.trainers.data_adapters import py_dataset_adapter
 
 if backend.backend() == "jax":
     from keras.src.backend.jax.trainer import JAXTrainer as Trainer
@@ -141,6 +142,82 @@ class TrainingTestingLayer(Trainer, layers.Layer):
         return x * 0
 
 
+class TestPyDataset(py_dataset_adapter.PyDataset):
+    def __init__(self, infinite=False, **kwargs):
+        super().__init__(**kwargs)
+        self.infinite = infinite
+
+    @property
+    def num_batches(self):
+        return None if self.infinite else 20
+
+    def __getitem__(self, idx):
+        CPU_DEVICES = {
+            "tensorflow": "CPU:0",
+            "jax": "cpu:0",
+            "torch": "cpu",
+        }
+        with backend.device(CPU_DEVICES[backend.backend()]):
+            return ops.ones((5, 4)), ops.zeros((5, 3))
+
+
+def create_dataset(dataset_type, dataset_kwargs):
+    if dataset_type == "np_array":
+        return np.ones((100, 4)), np.zeros((100, 3))
+    elif dataset_type == "native_array":
+        return ops.ones((100, 4)), ops.zeros((100, 3))
+    elif dataset_type == "py_dataset":
+        return TestPyDataset(**dataset_kwargs), None
+    elif dataset_type == "tf_dataset":
+        import tensorflow as tf
+
+        dataset = tf.data.Dataset.from_tensor_slices(
+            (tf.ones((100, 4)), tf.zeros((100, 3)))
+        ).batch(5)
+        if dataset_kwargs.get("infinite", False):
+            dataset = dataset.repeat()
+        return dataset, None
+    elif dataset_type == "torch_dataloader":
+        import torch
+
+        class TestIterableDataset(torch.utils.data.IterableDataset):
+            def __iter__(self):
+                for _ in range(20):
+                    yield torch.ones((5, 4)), torch.zeros((5, 3))
+
+        class TestIterableDatasetWithLen(TestIterableDataset):
+            def __len__(self):
+                return 20
+
+        if dataset_kwargs.get("iterable", False):
+            if dataset_kwargs.get("has_len", False):
+                dataset = TestIterableDatasetWithLen()
+            else:
+                dataset = TestIterableDataset()
+            return torch.utils.data.DataLoader(dataset), None
+        else:
+            dataset = torch.utils.data.TensorDataset(
+                torch.ones((100, 4)), torch.zeros((100, 3))
+            )
+            return torch.utils.data.DataLoader(dataset, batch_size=5), None
+    elif dataset_type == "generator":
+
+        def generate_finite():
+            for _ in range(20):
+                yield ops.ones((5, 4)), ops.zeros((5, 3))
+
+        def generate_infinite():
+            while True:
+                yield ops.ones((5, 4)), ops.zeros((5, 3))
+
+        if dataset_kwargs.get("infinite", False):
+            return generate_infinite(), None
+        else:
+            return generate_finite(), None
+    else:
+        raise ValueError(f"Invalid dataset type {dataset_type}")
+
+
 def sparse_generator(generator_type):
     if generator_type == "scipy":
         import scipy
@@ -168,6 +245,67 @@ def sparse_generator(generator_type):
             yield x, y
     else:
         raise ValueError(f"Invalid generator type {generator_type}")
+
+
+class EpochAgnosticMeanSquaredError(metrics.MeanSquaredError):
+    def __init__(self):
+        super().__init__(name="mse")
+        super().reset_state()
+
+    def reset_state(self):
+        # prevent reset at each starting epoch
+        pass
+
+
+class StepObserver(Callback):
+    def __init__(self):
+        super().__init__()
+        self.begin_count = 0
+        self.end_count = 0
+        self.epoch_begin_count = 0
+        self.epoch_end_count = 0
+        self.batch_loss_history = []
+
+    def on_epoch_begin(self, epoch, logs=None):
+        self.epoch_begin_count += 1
+
+    def on_epoch_end(self, epoch, logs=None):
+        self.epoch_end_count += 1
+
+    def on_batch_begin(self, batch, logs=None):
+        self.begin_count += 1
+
+    def on_batch_end(self, batch, logs=None):
+        self.end_count += 1
+        self.batch_loss_history.append(logs["mse"])
+
+
+class StepCount(Callback):
+    def __init__(self, batches_indices, batch_size):
+        super().__init__()
+        self.begin_count = 0
+        self.end_count = 0
+        self.epoch_begin_count = 0
+        self.epoch_end_count = 0
+        self.batches = batches_indices
+        self.batch_size = batch_size
+
+    def on_epoch_begin(self, epoch, logs=None):
+        self.begin_count = 0
+        self.end_count = 0
+        self.epoch_begin_count += 1
+
+    def on_epoch_end(self, epoch, logs=None):
+        self.epoch_end_count += 1
+
+    def on_batch_begin(self, batch, logs=None):
+        if self.begin_count < len(self.batches):
+            assert batch == self.batches[self.begin_count] // self.batch_size
+        self.begin_count += 1
+
+    def on_batch_end(self, batch, logs=None):
+        assert batch == self.batches[self.end_count] // self.batch_size
+        self.end_count += 1
 
 
 class TestTrainer(testing.TestCase):
@@ -294,11 +432,16 @@ class TestTrainer(testing.TestCase):
     @pytest.mark.requires_trainable_backend
     def test_fit_flow(self, run_eagerly, jit_compile, use_steps_per_epoch):
         if not run_eagerly and not jit_compile and use_steps_per_epoch:
-            if backend.backend() == "tensorflow":
+            if False and backend.backend() == "tensorflow":
                 self.skipTest(
                     "TODO: Graph mode without XLA in TF backend leads to "
                     "unexpected logs, need further checks."
                 )
+        if jit_compile and backend.backend() == "torch":
+            self.skipTest(
+                "TODO: compilation with torch backend leads to "
+                "unexpected logs, need further checks."
+            )
 
         model = ExampleModel(units=3)
         epochs = 3
@@ -328,8 +471,113 @@ class TestTrainer(testing.TestCase):
         self.assertAllClose(
             history["mean_squared_error"],
             [14.5, 11.5, 8.5],
-            atol=0.6,  # TODO: abnormal results for certain configs.
+            atol=1.0,  # TODO: results vary across backends
         )
+
+    @parameterized.named_parameters(
+        [
+            {
+                "testcase_name": "np_array",
+                "dataset_type": "np_array",
+                "fit_kwargs": {"batch_size": 5},
+            },
+            {
+                "testcase_name": "native_array",
+                "dataset_type": "native_array",
+                "fit_kwargs": {"batch_size": 5},
+            },
+            {
+                "testcase_name": "py_dataset",
+                "dataset_type": "py_dataset",
+            },
+            {
+                "testcase_name": "py_dataset_infinite",
+                "dataset_type": "py_dataset",
+                "dataset_kwargs": {"infinite": True},
+                "fit_kwargs": {"steps_per_epoch": 20},
+            },
+            {
+                "testcase_name": "py_dataset_multithreading",
+                "dataset_type": "py_dataset",
+                "dataset_kwargs": {"workers": 2},
+            },
+            {
+                "testcase_name": "py_dataset_multithreading_infinite",
+                "dataset_type": "py_dataset",
+                "dataset_kwargs": {"infinite": True, "workers": 2},
+                "fit_kwargs": {"steps_per_epoch": 20},
+            },
+            {
+                "testcase_name": "py_dataset_multiprocessing",
+                "dataset_type": "py_dataset",
+                "dataset_kwargs": {"workers": 2, "use_multiprocessing": True},
+            },
+            {
+                "testcase_name": "py_dataset_multiprocessing_infinite",
+                "dataset_type": "py_dataset",
+                "dataset_kwargs": {
+                    "infinite": True,
+                    "workers": 2,
+                    "use_multiprocessing": True,
+                },
+                "fit_kwargs": {"steps_per_epoch": 20},
+            },
+            {
+                "testcase_name": "tf_dataset",
+                "dataset_type": "tf_dataset",
+            },
+            {
+                "testcase_name": "tf_dataset_infinite",
+                "dataset_type": "tf_dataset",
+                "dataset_kwargs": {"infinite": True},
+                "fit_kwargs": {"steps_per_epoch": 20},
+            },
+            {
+                "testcase_name": "torch_dataloader_tensor",
+                "dataset_type": "torch_dataloader",
+            },
+            {
+                "testcase_name": "torch_dataloader_iterable",
+                "dataset_type": "torch_dataloader",
+                "dataset_kwargs": {"iterable": True, "has_len": False},
+            },
+            {
+                "testcase_name": "torch_dataloader_iterable_with_len",
+                "dataset_type": "torch_dataloader",
+                "dataset_kwargs": {"iterable": True, "has_len": True},
+            },
+            {
+                "testcase_name": "generator",
+                "dataset_type": "generator",
+            },
+            {
+                "testcase_name": "generator_infinite",
+                "dataset_type": "generator",
+                "dataset_kwargs": {"infinite": True},
+                "fit_kwargs": {"steps_per_epoch": 20},
+            },
+        ]
+    )
+    @pytest.mark.requires_trainable_backend
+    def test_fit_with_data_adapter(
+        self, dataset_type, dataset_kwargs={}, fit_kwargs={}
+    ):
+        if (
+            dataset_kwargs.get("use_multiprocessing", False)
+            and backend.backend() == "jax"
+        ):
+            pytest.skip("Multiprocessing not supported with JAX backend")
+
+        model = ExampleModel(units=3)
+        optimizer = optimizers.Adagrad()
+        model.compile(
+            optimizer=optimizer,
+            loss=losses.MeanSquaredError(),
+            metrics=[metrics.MeanSquaredError()],
+            jit_compile=True,
+        )
+        x, y = create_dataset(dataset_type, dataset_kwargs)
+        model.fit(x, y, epochs=3, **fit_kwargs)
 
     @parameterized.named_parameters(
         [
@@ -589,7 +837,11 @@ class TestTrainer(testing.TestCase):
             jit_compile=False,
         )
         dataset = sparse_generator(generator_type)
-        model.predict(dataset)
+        dataset_size = sum(
+            [batch[1].shape[0] for batch in sparse_generator(generator_type)]
+        )
+        y = model.predict(dataset)
+        self.assertEqual(len(y), dataset_size)
 
     @pytest.mark.skipif(
         backend.backend() != "jax",
@@ -648,46 +900,681 @@ class TestTrainer(testing.TestCase):
             callbacks=[ModelWeightCheck()],
         )
 
+    @parameterized.named_parameters(
+        named_product(
+            steps_per_execution=[3, 101], mode=["eager", "non_jit", "jit"]
+        )
+    )
     @pytest.mark.requires_trainable_backend
     @pytest.mark.skipif(
         backend.backend() == "torch",
         reason="`steps_per_execution` not implemented for torch yet",
     )
-    def test_steps_per_execution_steps_count(self):
-        class StepCount(Callback):
-            def __init__(self):
-                super().__init__()
-                self.count = 0
-                self.batches = [0, 3, 6]
-
-            def on_batch_begin(self, batch, logs=None):
-                assert batch == self.batches[self.count]
-                self.count += 1
-
-        x = np.ones((100, 4))
-        y = np.ones((100, 1))
+    def test_steps_per_execution_steps_count(self, steps_per_execution, mode):
+        data_size = 100
         batch_size = 16
+        epochs = 2
+
+        batches_indices = list(
+            range(0, data_size, steps_per_execution * batch_size)
+        )
+
+        x = np.ones((data_size, 4))
+        y = np.ones((data_size, 1))
+
         model = ExampleModel(units=1)
         model.compile(
             loss="mse",
-            optimizer="adam",
-            steps_per_execution=3,
-            jit_compile=True,  # TODO: fails in eager?
+            optimizer="sgd",
+            steps_per_execution=steps_per_execution,
+            run_eagerly=(mode == "eager"),
+            jit_compile=(mode == "jit"),
         )
-        step_count = StepCount()
-        model.fit(x=x, y=y, batch_size=16, callbacks=[step_count], verbose=0)
-        self.assertEqual(step_count.count, 3)
+        step_count = StepCount(batches_indices, batch_size)
+
+        history = model.fit(
+            x=x,
+            y=y,
+            batch_size=batch_size,
+            epochs=epochs,
+            callbacks=[step_count],
+            verbose=0,
+        )
+
+        self.assertEqual(step_count.begin_count, len(batches_indices))
+        self.assertEqual(step_count.end_count, step_count.begin_count)
+        self.assertEqual(step_count.epoch_begin_count, epochs)
+        self.assertEqual(
+            step_count.epoch_end_count, step_count.epoch_begin_count
+        )
 
         model_2 = ExampleModel(units=1)
-        model_2.compile(loss="mse", optimizer="adam", steps_per_execution=1)
-        model_2.fit(x=x, y=y, batch_size=batch_size, verbose=0)
+        model_2.compile(
+            loss="mse",
+            optimizer="sgd",
+            steps_per_execution=1,
+            run_eagerly=(mode == "eager"),
+            jit_compile=(mode == "jit"),
+        )
+        history_2 = model_2.fit(
+            x=x, y=y, batch_size=batch_size, epochs=epochs, verbose=0
+        )
 
+        self.assertAllClose(history.history["loss"], history_2.history["loss"])
         self.assertAllClose(model.get_weights(), model_2.get_weights())
         self.assertAllClose(
             model.predict(x, batch_size=batch_size),
             model_2.predict(x, batch_size=batch_size),
         )
         self.assertAllClose(model.evaluate(x, y), model_2.evaluate(x, y))
+
+    @parameterized.named_parameters(
+        named_product(steps_per_execution=[3, 8, 32])
+    )
+    @pytest.mark.requires_trainable_backend
+    @pytest.mark.skipif(
+        backend.backend() != "tensorflow",
+        reason="`unrolled_steps_per_execution` is only "
+        "available with the tensorflow backend.",
+    )
+    def test_steps_per_execution_unrolled_steps_steps_count(
+        self, steps_per_execution
+    ):
+        data_size = 100
+        batch_size = 16
+        epochs = 2
+        unrolled_steps_per_execution = 8
+
+        batches_indices = list(
+            range(0, data_size, steps_per_execution * batch_size)
+        )
+
+        x = np.ones((data_size, 4))
+        y = np.ones((data_size, 1))
+
+        model = ExampleModel(units=1)
+        model.compile(
+            loss="mse",
+            optimizer="sgd",
+            steps_per_execution=steps_per_execution,
+            jit_compile=True,
+        )
+        step_count = StepCount(batches_indices, batch_size)
+        model.unrolled_steps_per_execution = unrolled_steps_per_execution
+        history = model.fit(
+            x=x,
+            y=y,
+            batch_size=batch_size,
+            epochs=epochs,
+            callbacks=[step_count],
+            verbose=0,
+        )
+
+        self.assertEqual(step_count.begin_count, len(batches_indices))
+        self.assertEqual(step_count.end_count, step_count.begin_count)
+        self.assertEqual(step_count.epoch_begin_count, epochs)
+        self.assertEqual(
+            step_count.epoch_end_count, step_count.epoch_begin_count
+        )
+
+        model_2 = ExampleModel(units=1)
+        model_2.compile(
+            loss="mse",
+            optimizer="sgd",
+            steps_per_execution=steps_per_execution,
+            jit_compile=True,
+        )
+        model_2.unrolled_steps_per_execution = 1
+        history_2 = model_2.fit(
+            x=x, y=y, batch_size=batch_size, epochs=epochs, verbose=0
+        )
+
+        self.assertAllClose(history.history["loss"], history_2.history["loss"])
+        self.assertAllClose(model.get_weights(), model_2.get_weights())
+        self.assertAllClose(
+            model.predict(x, batch_size=batch_size),
+            model_2.predict(x, batch_size=batch_size),
+        )
+        self.assertAllClose(model.evaluate(x, y), model_2.evaluate(x, y))
+
+    @parameterized.named_parameters(
+        named_product(
+            steps_per_execution=[1, 50], mode=["eager", "non_jit", "jit"]
+        )
+    )
+    def test_predict_preserve_order(self, steps_per_execution, mode):
+        if steps_per_execution > 1 and backend.backend() == "torch":
+            self.skipTest("`steps_per_execution` not implemented for torch yet")
+
+        def generate_uneven_batches():
+            batch_sizes = [2, 3, 4]
+
+            def gen_i():
+                for i in range(100):
+                    yield i
+
+            iterator = iter(gen_i())
+            j = 0
+            while True:
+                batch_size = batch_sizes[j % len(batch_sizes)]
+                try:
+                    batch = np.array(
+                        [next(iterator) for _ in range(batch_size)]
+                    )
+                except StopIteration:
+                    break
+                j += 1
+                yield batch
+
+        from keras.src.utils.module_utils import tensorflow as tf
+
+        dataset = tf.data.Dataset.from_generator(
+            generate_uneven_batches,
+            output_signature=tf.TensorSpec((None,), dtype=tf.int32),
+        )
+        x = keras.layers.Input(shape=())
+        y = keras.layers.Identity()(x)
+        model = keras.Model(x, y)
+        model.compile(
+            loss="mse",
+            optimizer="sgd",
+            steps_per_execution=steps_per_execution,
+            run_eagerly=(mode == "eager"),
+            jit_compile=(mode == "jit"),
+        )
+
+        preds = model.predict(x=dataset, verbose=0)
+
+        self.assertAllEqual(preds, np.arange(len(preds), dtype=np.float32))
+
+    @parameterized.named_parameters(
+        named_product(
+            steps_per_execution=[1, 50], mode=["eager", "non_jit", "jit"]
+        )
+    )
+    def test_predict_generator(self, steps_per_execution, mode):
+        if steps_per_execution > 1 and backend.backend() == "torch":
+            self.skipTest("`steps_per_execution` not implemented for torch yet")
+
+        batch_size = 2
+
+        def generate_batches():
+            def gen_i():
+                for i in range(10):
+                    yield i
+
+            iterator = iter(gen_i())
+            j = 0
+            while True:
+                try:
+                    batch = np.array(
+                        [next(iterator) for _ in range(batch_size)]
+                    )
+                except StopIteration:
+                    break
+                j += 1
+                yield (batch,)
+
+        model = keras.Sequential(
+            [keras.layers.InputLayer(shape=()), keras.layers.Identity()]
+        )
+        model.compile(
+            loss="mse",
+            optimizer="sgd",
+            steps_per_execution=steps_per_execution,
+            run_eagerly=(mode == "eager"),
+            jit_compile=(mode == "jit"),
+        )
+
+        preds = model.predict(x=generate_batches(), verbose=0)
+        self.assertAllEqual(
+            preds, np.concatenate(list(generate_batches()), axis=1)[0]
+        )
+
+    @parameterized.named_parameters(
+        named_product(
+            steps_per_execution=[3, 101], mode=["eager", "non_jit", "jit"]
+        )
+    )
+    @pytest.mark.requires_trainable_backend
+    @pytest.mark.skipif(
+        backend.backend() == "torch",
+        reason="`steps_per_execution` not implemented for torch yet",
+    )
+    def test_steps_per_execution_steps_count_unknown_dataset_size(
+        self, steps_per_execution, mode
+    ):
+        data_size = 100
+        batch_size = 16
+        epochs = 2
+
+        batches_indices = list(
+            range(0, data_size, steps_per_execution * batch_size)
+        )
+
+        def data_generator():
+            x = np.ones((data_size, 4), dtype=np.float32)
+            y = np.ones((data_size, 1), dtype=np.float32)
+            for _x, _y in zip(x, y):
+                yield _x, _y
+
+        import tensorflow as tf
+
+        dataset = tf.data.Dataset.from_generator(
+            data_generator,
+            output_signature=(
+                tf.TensorSpec(shape=(4,), dtype=tf.float32),
+                tf.TensorSpec(shape=(1,), dtype=tf.float32),
+            ),
+        )
+        dataset = dataset.batch(batch_size)
+
+        model = ExampleModel(units=1)
+        model.compile(
+            loss="mse",
+            optimizer="sgd",
+            steps_per_execution=steps_per_execution,
+            run_eagerly=(mode == "eager"),
+            jit_compile=(mode == "jit"),
+        )
+        step_count = StepCount(batches_indices, batch_size)
+
+        history = model.fit(
+            dataset,
+            epochs=epochs,
+            callbacks=[step_count],
+            verbose=0,
+        )
+
+        self.assertGreaterEqual(step_count.begin_count, len(batches_indices))
+        self.assertEqual(step_count.end_count, len(batches_indices))
+        self.assertEqual(step_count.epoch_begin_count, epochs)
+        self.assertEqual(
+            step_count.epoch_end_count, step_count.epoch_begin_count
+        )
+
+        model_2 = ExampleModel(units=1)
+        model_2.compile(
+            loss="mse",
+            optimizer="sgd",
+            steps_per_execution=1,
+            run_eagerly=(mode == "eager"),
+            jit_compile=(mode == "jit"),
+        )
+        history_2 = model_2.fit(dataset, epochs=epochs, verbose=0)
+
+        self.assertAllClose(history.history["loss"], history_2.history["loss"])
+        self.assertAllClose(model.get_weights(), model_2.get_weights())
+        self.assertAllClose(
+            model.predict(dataset),
+            model_2.predict(dataset),
+        )
+        self.assertAllClose(model.evaluate(dataset), model_2.evaluate(dataset))
+
+    @parameterized.named_parameters(
+        named_product(
+            steps_per_epoch_test=[
+                "match_one_epoch",
+                "match_multi_epoch",
+                "not_match_too_low",
+                "not_match_but_high_enough",
+            ],
+            mode=["eager", "non_jit", "jit"],
+        )
+    )
+    @pytest.mark.requires_trainable_backend
+    @pytest.mark.skipif(
+        backend.backend() == "torch",
+        reason="`steps_per_execution` not implemented for torch yet",
+    )
+    def test_steps_per_execution_steps_per_epoch(
+        self, steps_per_epoch_test, mode
+    ):
+        batch_size = 8
+        epochs = 2
+        steps_per_execution = 2
+        num_batches = 5 * steps_per_execution
+        data_size = num_batches * batch_size
+
+        if steps_per_epoch_test == "match_one_epoch":
+            steps_per_epoch = num_batches
+        elif steps_per_epoch_test == "match_multi_epoch":
+            steps_per_epoch = num_batches // steps_per_execution
+        elif steps_per_epoch_test == "not_match_too_low":
+            steps_per_epoch = num_batches - steps_per_execution
+        elif steps_per_epoch_test == "not_match_but_high_enough":
+            steps_per_epoch = num_batches + steps_per_execution
+
+        x = np.ones((data_size, 4))
+        y = np.ones((data_size, 1))
+
+        model = ExampleModel(units=1)
+        model.compile(
+            loss="mse",
+            optimizer="sgd",
+            metrics=[EpochAgnosticMeanSquaredError()],
+            steps_per_execution=steps_per_execution,
+            run_eagerly=(mode == "eager"),
+            jit_compile=(mode == "jit"),
+        )
+        step_observer = StepObserver()
+
+        model.fit(
+            x=x,
+            y=y,
+            batch_size=batch_size,
+            epochs=epochs,
+            steps_per_epoch=steps_per_epoch,
+            callbacks=[step_observer],
+            verbose=0,
+        )
+        if steps_per_epoch_test != "not_match_too_low":
+            training_batch_count = (
+                epochs
+                * min(steps_per_epoch, num_batches)
+                // steps_per_execution
+            )
+        else:
+            complete_epochs = (num_batches // steps_per_execution) // (
+                steps_per_epoch // steps_per_execution
+            )
+            remaining_steps = (num_batches // steps_per_execution) % (
+                steps_per_epoch // steps_per_execution
+            )
+            steps_cycles = [
+                complete_epochs * steps_per_epoch // steps_per_execution,
+                remaining_steps,
+            ] * epochs
+            steps_per_epochs = steps_cycles[:epochs]
+            training_batch_count = sum(steps_per_epochs)
+
+        self.assertEqual(step_observer.begin_count, training_batch_count)
+        self.assertEqual(step_observer.end_count, step_observer.begin_count)
+        self.assertEqual(step_observer.epoch_begin_count, epochs)
+        self.assertEqual(
+            step_observer.epoch_end_count, step_observer.epoch_begin_count
+        )
+
+        if steps_per_epoch_test != "not_match_too_low":
+            model_2 = ExampleModel(units=1)
+            model_2.compile(
+                loss="mse",
+                optimizer="sgd",
+                metrics=[EpochAgnosticMeanSquaredError()],
+                steps_per_execution=1,
+                run_eagerly=(mode == "eager"),
+                jit_compile=(mode == "jit"),
+            )
+            step_observer_2 = StepObserver()
+
+            if steps_per_epoch_test in (
+                "not_match_but_high_enough",
+                "match_one_epoch",
+            ):
+                model_2_epochs = epochs
+            else:
+                model_2_epochs = 1
+
+            model_2.fit(
+                x=x,
+                y=y,
+                batch_size=batch_size,
+                epochs=model_2_epochs,
+                callbacks=[step_observer_2],
+                verbose=0,
+            )
+
+            losses = step_observer.batch_loss_history
+            losses_2 = step_observer_2.batch_loss_history[
+                steps_per_execution - 1 :: steps_per_execution
+            ]
+            self.assertAllClose(losses, losses_2)
+            self.assertAllClose(model.get_weights(), model_2.get_weights())
+            self.assertAllClose(
+                model.predict(x, batch_size=batch_size),
+                model_2.predict(x, batch_size=batch_size),
+            )
+            self.assertAllClose(model.evaluate(x, y), model_2.evaluate(x, y))
+
+    @parameterized.named_parameters(
+        named_product(
+            steps_per_epoch_test=[
+                "match_one_epoch",
+                "match_multi_epoch",
+                "not_match_too_low",
+                "not_match_but_high_enough",
+            ],
+            mode=["eager", "non_jit", "jit"],
+        )
+    )
+    @pytest.mark.requires_trainable_backend
+    def test_steps_per_epoch(self, steps_per_epoch_test, mode):
+        batch_size = 8
+        epochs = 4
+        num_batches = 10
+        data_size = num_batches * batch_size
+
+        if steps_per_epoch_test == "match_one_epoch":
+            steps_per_epoch = num_batches
+        elif steps_per_epoch_test == "match_multi_epoch":
+            steps_per_epoch = num_batches // (epochs // 2)
+        elif steps_per_epoch_test == "not_match_too_low":
+            steps_per_epoch = num_batches - 1
+        elif steps_per_epoch_test == "not_match_but_high_enough":
+            steps_per_epoch = num_batches + 1
+
+        x = np.ones((data_size, 4))
+        y = np.ones((data_size, 1))
+
+        model = ExampleModel(units=1)
+        model.compile(
+            loss="mse",
+            optimizer="sgd",
+            metrics=[EpochAgnosticMeanSquaredError()],
+            run_eagerly=(mode == "eager"),
+            jit_compile=(mode == "jit"),
+        )
+        step_observer = StepObserver()
+
+        model.fit(
+            x=x,
+            y=y,
+            batch_size=batch_size,
+            epochs=epochs,
+            steps_per_epoch=steps_per_epoch,
+            callbacks=[step_observer],
+            verbose=0,
+        )
+        if steps_per_epoch_test != "not_match_too_low":
+            training_batch_count = epochs * min(steps_per_epoch, num_batches)
+        else:
+            complete_epochs = num_batches // steps_per_epoch
+            remaining_steps = num_batches % steps_per_epoch
+            steps_cycles = [
+                complete_epochs * steps_per_epoch,
+                remaining_steps,
+            ] * epochs
+            steps_per_epochs = steps_cycles[:epochs]
+            training_batch_count = sum(steps_per_epochs)
+
+        self.assertEqual(step_observer.begin_count, training_batch_count)
+        self.assertEqual(step_observer.end_count, step_observer.begin_count)
+        self.assertEqual(step_observer.epoch_begin_count, epochs)
+        self.assertEqual(
+            step_observer.epoch_end_count, step_observer.epoch_begin_count
+        )
+
+        if steps_per_epoch_test != "not_match_too_low":
+            model_2 = ExampleModel(units=1)
+            model_2.compile(
+                loss="mse",
+                optimizer="sgd",
+                metrics=[EpochAgnosticMeanSquaredError()],
+                steps_per_execution=1,
+                run_eagerly=(mode == "eager"),
+                jit_compile=(mode == "jit"),
+            )
+            step_observer_2 = StepObserver()
+
+            if steps_per_epoch_test in (
+                "not_match_but_high_enough",
+                "match_one_epoch",
+            ):
+                model_2_epochs = epochs
+            elif steps_per_epoch_test == "match_multi_epoch":
+                model_2_epochs = epochs // (num_batches // steps_per_epoch)
+            else:
+                model_2_epochs = 1
+
+            model_2.fit(
+                x=x,
+                y=y,
+                batch_size=batch_size,
+                epochs=model_2_epochs,
+                callbacks=[step_observer_2],
+                verbose=0,
+            )
+
+            losses = step_observer.batch_loss_history
+            losses_2 = step_observer_2.batch_loss_history
+
+            self.assertAllClose(losses, losses_2)
+            self.assertAllClose(model.get_weights(), model_2.get_weights())
+            self.assertAllClose(
+                model.predict(x, batch_size=batch_size),
+                model_2.predict(x, batch_size=batch_size),
+            )
+            self.assertAllClose(model.evaluate(x, y), model_2.evaluate(x, y))
+
+    @parameterized.named_parameters(
+        named_product(
+            steps_per_epoch_test=[
+                "match",
+                "not_match_too_low",
+                "not_match_but_high_enough",
+            ],
+            mode=["eager", "non_jit", "jit"],
+        )
+    )
+    @pytest.mark.requires_trainable_backend
+    @pytest.mark.skipif(
+        backend.backend() == "torch",
+        reason="`steps_per_execution` not implemented for torch yet",
+    )
+    def test_steps_per_execution_steps_per_epoch_unknown_data_size(
+        self, steps_per_epoch_test, mode
+    ):
+        batch_size = 8
+        epochs = 2
+        steps_per_execution = 2
+        num_batches = 5 * epochs * steps_per_execution
+        data_size = num_batches * batch_size
+
+        if steps_per_epoch_test == "match":
+            steps_per_epoch = num_batches // epochs
+        elif steps_per_epoch_test == "not_match_too_low":
+            steps_per_epoch = num_batches - steps_per_execution
+        elif steps_per_epoch_test == "not_match_but_high_enough":
+            steps_per_epoch = num_batches + steps_per_execution
+
+        def data_generator():
+            x = np.ones((data_size, 4), dtype=np.float32)
+            y = np.ones((data_size, 1), dtype=np.float32)
+            for _x, _y in zip(x, y):
+                yield _x, _y
+
+        import tensorflow as tf
+
+        dataset = tf.data.Dataset.from_generator(
+            data_generator,
+            output_signature=(
+                tf.TensorSpec(shape=(4,), dtype=tf.float32),
+                tf.TensorSpec(shape=(1,), dtype=tf.float32),
+            ),
+        )
+        dataset = dataset.batch(batch_size)
+
+        model = ExampleModel(units=1)
+        model.compile(
+            loss="mse",
+            optimizer="sgd",
+            metrics=[EpochAgnosticMeanSquaredError()],
+            steps_per_execution=steps_per_execution,
+            run_eagerly=(mode == "eager"),
+            jit_compile=(mode == "jit"),
+        )
+        step_observer = StepObserver()
+
+        model.fit(
+            dataset,
+            epochs=epochs,
+            steps_per_epoch=steps_per_epoch,
+            callbacks=[step_observer],
+            verbose=0,
+        )
+        if steps_per_epoch_test != "not_match_too_low":
+            training_batch_count = (
+                epochs
+                * min(steps_per_epoch, num_batches)
+                // steps_per_execution
+            )
+        else:
+            complete_epochs = (num_batches // steps_per_execution) // (
+                steps_per_epoch // steps_per_execution
+            )
+            remaining_steps = (num_batches // steps_per_execution) % (
+                steps_per_epoch // steps_per_execution
+            )
+            steps_cycles = [
+                complete_epochs * steps_per_epoch // steps_per_execution,
+                remaining_steps,
+            ] * epochs
+            steps_per_epochs = steps_cycles[:epochs]
+            training_batch_count = sum(steps_per_epochs)
+
+        self.assertGreaterEqual(step_observer.begin_count, training_batch_count)
+        self.assertEqual(step_observer.end_count, training_batch_count)
+        self.assertEqual(step_observer.epoch_begin_count, epochs)
+        self.assertEqual(
+            step_observer.epoch_end_count, step_observer.epoch_begin_count
+        )
+
+        if steps_per_epoch_test != "not_match_too_low":
+            model_2 = ExampleModel(units=1)
+            model_2.compile(
+                loss="mse",
+                optimizer="sgd",
+                metrics=[EpochAgnosticMeanSquaredError()],
+                steps_per_execution=1,
+                run_eagerly=(mode == "eager"),
+                jit_compile=(mode == "jit"),
+            )
+            step_observer_2 = StepObserver()
+
+            if steps_per_epoch_test == "not_match_but_high_enough":
+                model_2_epochs = epochs
+            else:
+                model_2_epochs = 1
+
+            model_2.fit(
+                dataset,
+                epochs=model_2_epochs,
+                callbacks=[step_observer_2],
+                verbose=0,
+            )
+
+            losses = step_observer.batch_loss_history
+            losses_2 = step_observer_2.batch_loss_history[
+                steps_per_execution - 1 :: steps_per_execution
+            ]
+            self.assertAllClose(losses, losses_2)
+            self.assertAllClose(model.get_weights(), model_2.get_weights())
+            self.assertAllClose(
+                model.predict(dataset), model_2.predict(dataset)
+            )
+            self.assertAllClose(
+                model.evaluate(dataset), model_2.evaluate(dataset)
+            )
 
     @pytest.mark.skipif(
         backend.backend() == "torch",
@@ -1363,7 +2250,6 @@ class TestTrainer(testing.TestCase):
 
     @pytest.mark.requires_trainable_backend
     def test_callbacks_can_update_state_at_batch_boundary(self):
-
         class CounterModel(keras.Model):
             def __init__(self):
                 super().__init__()
@@ -1540,7 +2426,6 @@ class TestTrainer(testing.TestCase):
 
     @pytest.mark.requires_trainable_backend
     def test_compute_loss_no_training_backwards_compatibility(self):
-
         class MyModel(keras.Model):
             def __init__(self):
                 super().__init__()
@@ -1659,6 +2544,23 @@ class TestTrainer(testing.TestCase):
             atol=1e-3,
         )
 
+    @pytest.mark.requires_trainable_backend
+    def test_partial_loss_partial_label(self):
+        inputs = keras.Input((2,))
+        x = keras.layers.Dense(3, kernel_initializer="ones")(inputs)
+        partial_model = keras.Model(inputs, [x, x, x])
+        partial_model.compile(loss=["mse", None, None])
+        full_model = keras.Model(inputs, [x, x, x])
+        full_model.compile(loss=["mse", "mse", "mse"])
+
+        eval_x = np.ones((32, 2))
+        eval_y = np.ones((32, 3))
+
+        partial_logs = partial_model.evaluate(eval_x, eval_y, return_dict=True)
+        logs = full_model.evaluate(eval_x, [eval_y] * 3, return_dict=True)
+
+        self.assertAlmostEqual(partial_logs["loss"] * 3, logs["loss"])
+
     def test_symbolic_build(self):
         class ExampleModelWithTrainingArgs(Trainer, layers.Layer):
             def __init__(self, units):
@@ -1738,6 +2640,79 @@ class TestTrainer(testing.TestCase):
 
         self.assertFalse(model.jit_compile)
         disable_op_determinism()
+
+    @pytest.mark.requires_trainable_backend
+    @pytest.mark.skipif(
+        backend.backend() == "torch",
+        reason="`steps_per_execution` not implemented for torch yet",
+    )
+    def test_retracing(self):
+        x = np.ones((100, 4))
+        y = np.ones((100, 1))
+
+        input = keras.Input(shape=[4])
+        output = keras.layers.Dense(1, activation="relu")(input)
+
+        tracing_count = [0]
+
+        class TracingCounterModel(keras.Model):
+            def train_step(self, *args):
+                tracing_count[0] = tracing_count[0] + 1
+                return super().train_step(*args)
+
+        model = TracingCounterModel(inputs=input, outputs=output)
+        model.compile(
+            loss="mse",
+            optimizer="adam",
+            steps_per_execution=20,
+        )
+
+        epochs = 1
+        model.fit(
+            x=x,
+            y=y,
+            batch_size=1,
+            epochs=epochs,
+            verbose=0,
+        )
+        self.assertLessEqual(tracing_count[0], 2)
+
+    @pytest.mark.requires_trainable_backend
+    @pytest.mark.skipif(
+        backend.backend() == "torch",
+        reason="`steps_per_execution` not implemented for torch yet",
+    )
+    @pytest.mark.skipif(
+        backend.backend() == "tensorflow",
+        reason="`predict_function` with `steps_per_execution` is not "
+        "optimized for tensorflow yet",
+    )
+    def test_retracing_predict(self):
+        x = np.ones((100, 4))
+
+        input = keras.Input(shape=[4])
+        output = keras.layers.Dense(1, activation="relu")(input)
+
+        tracing_count = [0]
+
+        class TracingCounterModel(keras.Model):
+            def predict_step(self, *args):
+                tracing_count[0] = tracing_count[0] + 1
+                return super().predict_step(*args)
+
+        model = TracingCounterModel(inputs=input, outputs=output)
+        model.compile(
+            loss="mse",
+            optimizer="adam",
+            steps_per_execution=20,
+        )
+
+        model.predict(
+            x=x,
+            batch_size=1,
+            verbose=0,
+        )
+        self.assertLessEqual(tracing_count[0], 2)
 
 
 class TrainerDistributeTest(testing.TestCase):

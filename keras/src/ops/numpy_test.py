@@ -2975,7 +2975,7 @@ class NumpyTwoInputOpsCorrectnessTest(testing.TestCase):
         self.assertAllClose(knp.where(x > 1), np.where(x > 1))
         self.assertAllClose(knp.Where()(x > 1), np.where(x > 1))
 
-        with self.assertRaisesRegexp(
+        with self.assertRaisesRegex(
             ValueError, "`x1` and `x2` either both should be `None`"
         ):
             knp.where(x > 1, x, None)
@@ -3295,7 +3295,7 @@ class NumpyOneInputOpsCorrectnessTest(testing.TestCase):
         self.assertTrue(backend.is_tensor(knp.array(x)))
         self.assertTrue(backend.is_tensor(knp.Array()(x)))
 
-        # Check dtype convertion.
+        # Check dtype conversion.
         x = [[1, 0, 1], [1, 1, 0]]
         output = knp.array(x, dtype="int32")
         self.assertEqual(standardize_dtype(output.dtype), "int32")
@@ -3423,9 +3423,9 @@ class NumpyOneInputOpsCorrectnessTest(testing.TestCase):
         self.assertAllClose(knp.Ceil()(x), np.ceil(x))
 
     def test_clip(self):
-        x = np.array([[1.2, 2.1, -2.5], [2.4, -11.9, -5.5]])
-        self.assertAllClose(knp.clip(x, -2, 2), np.clip(x, -2, 2))
-        self.assertAllClose(knp.clip(x, -2, 2), np.clip(x, -2, 2))
+        x = np.array([[1.2, 2.1, 0.5], [2.4, 11.9, 0.5]])
+        self.assertAllClose(knp.clip(x, 1, 2), np.clip(x, 1, 2))
+        self.assertAllClose(knp.clip(x, 1, 2), np.clip(x, 1, 2))
 
         self.assertAllClose(knp.Clip(0, 1)(x), np.clip(x, 0, 1))
         self.assertAllClose(knp.Clip(0, 1)(x), np.clip(x, 0, 1))
@@ -3746,7 +3746,7 @@ class NumpyOneInputOpsCorrectnessTest(testing.TestCase):
         self.assertAllClose(knp.isfinite(x), np.isfinite(x))
         self.assertAllClose(knp.Isfinite()(x), np.isfinite(x))
 
-    # TODO: fix and reenable
+    # TODO: fix and re-enable
     def DISABLED_test_isinf(self):
         x = np.array([[1, 2, np.inf], [np.nan, np.nan, np.nan]])
         self.assertAllClose(knp.isinf(x), np.isinf(x))
@@ -3992,8 +3992,8 @@ class NumpyOneInputOpsCorrectnessTest(testing.TestCase):
         # 5D (pad arbitrary dimensions)
         if backend.backend() == "torch" and mode != "constant":
             self.skipTest(
-                "reflect and symmetric padding for arbitary dimensions are not "
-                "supported by torch"
+                "reflect and symmetric padding for arbitrary dimensions "
+                "are not supported by torch"
             )
         x = np.ones([2, 3, 4, 5, 6], dtype=dtype)
         pad_width = ((1, 1), (2, 1), (3, 2), (4, 3), (5, 4))
@@ -4898,10 +4898,10 @@ class SparseTest(testing.TestCase):
     ]
 
     def assertSameSparseness(self, x, y):
-        self.assertEquals(sparseness(x), sparseness(y))
+        self.assertEqual(sparseness(x), sparseness(y))
 
     def assertSparseness(self, x, expected_sparseness):
-        self.assertEquals(sparseness(x), expected_sparseness)
+        self.assertEqual(sparseness(x), expected_sparseness)
 
     @parameterized.named_parameters(ELEMENTWISE_UNARY_OPS_TESTS)
     def test_elementwise_unary_symbolic_static_shape(
@@ -6066,15 +6066,15 @@ class NumpyDtypeTest(testing.TestCase):
 
         x = knp.ones((1,), dtype=dtype)
         x_jax = jnp.ones((1,), dtype=dtype)
-        expected_dtype = standardize_dtype(jnp.clip(x_jax, -2, 2).dtype)
+        expected_dtype = standardize_dtype(jnp.clip(x_jax, 1, 2).dtype)
         if dtype == "bool":
             expected_dtype = "int32"
 
         self.assertEqual(
-            standardize_dtype(knp.clip(x, -2, 2).dtype), expected_dtype
+            standardize_dtype(knp.clip(x, 1, 2).dtype), expected_dtype
         )
         self.assertEqual(
-            standardize_dtype(knp.Clip(-2, 2).symbolic_call(x).dtype),
+            standardize_dtype(knp.Clip(1, 2).symbolic_call(x).dtype),
             expected_dtype,
         )
 

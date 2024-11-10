@@ -302,6 +302,48 @@ def gelu(x, approximate=False):
     return ops.gelu(x, approximate=approximate)
 
 
+@keras_export("keras.activations.celu")
+def celu(x, alpha=1.0):
+    """Continuously Differentiable Exponential Linear Unit.
+
+    The CeLU activation function is defined as:
+
+    `celu(x) = alpha * (exp(x / alpha) - 1) for x < 0`,`celu(x) = x for x >= 0`.
+
+    where `alpha` is a scaling parameter that controls the activation's shape.
+
+    Args:
+        x: Input tensor.
+        alpha: The α value for the CeLU formulation. Defaults to `1.0`.
+
+    Reference:
+
+    - [Barron, J. T., 2017](https://arxiv.org/abs/1704.07483)
+    """
+    return ops.celu(x, alpha=alpha)
+
+
+@keras_export("keras.activations.glu")
+def glu(x, axis=-1):
+    """Gated Linear Unit (GLU) activation function.
+
+    The GLU activation function is defined as:
+
+    `glu(x) = a * sigmoid(b)`,
+
+    where `x` is split into two equal parts `a` and `b` along the given axis.
+
+    Args:
+        x: Input tensor.
+        axis: The axis along which to split the input tensor. Defaults to `-1`.
+
+    Reference:
+
+    - [Dauphin et al., 2017](https://arxiv.org/abs/1612.08083)
+    """
+    return ops.glu(x, axis=axis)
+
+
 @keras_export("keras.activations.tanh")
 def tanh(x):
     """Hyperbolic tangent activation function.
@@ -314,6 +356,21 @@ def tanh(x):
         x: Input tensor.
     """
     return ops.tanh(x)
+
+
+@keras_export("keras.activations.hard_tanh")
+def hard_tanh(x):
+    """HardTanh activation function.
+
+    It is defined as:
+    `hard_tanh(x) = -1 for x < -1`,
+    `hard_tanh(x) = x for -1 <= x <= 1`,
+    `hard_tanh(x) = 1 for x > 1`.
+
+    Args:
+        x: Input tensor.
+    """
+    return ops.hard_tanh(x)
 
 
 @keras_export("keras.activations.sigmoid")
@@ -374,6 +431,19 @@ def hard_sigmoid(x):
     - [Wikipedia "Hard sigmoid"](https://en.wikipedia.org/wiki/Hard_sigmoid)
     """
     return ops.hard_sigmoid(x)
+
+
+@keras_export("keras.activations.log_sigmoid")
+def log_sigmoid(x):
+    """Logarithm of the sigmoid activation function.
+
+    It is defined as `f(x) = log(1 / (1 + exp(-x)))`.
+
+    Args:
+        x: Input tensor.
+
+    """
+    return ops.log_sigmoid(x)
 
 
 @keras_export(["keras.activations.hard_silu", "keras.activations.hard_swish"])

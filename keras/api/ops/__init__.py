@@ -47,6 +47,7 @@ from keras.src.ops.math import erfinv
 from keras.src.ops.math import extract_sequences
 from keras.src.ops.math import fft
 from keras.src.ops.math import fft2
+from keras.src.ops.math import ifft2
 from keras.src.ops.math import in_top_k
 from keras.src.ops.math import irfft
 from keras.src.ops.math import istft
@@ -62,6 +63,7 @@ from keras.src.ops.nn import average_pool
 from keras.src.ops.nn import batch_normalization
 from keras.src.ops.nn import binary_crossentropy
 from keras.src.ops.nn import categorical_crossentropy
+from keras.src.ops.nn import celu
 from keras.src.ops.nn import conv
 from keras.src.ops.nn import conv_transpose
 from keras.src.ops.nn import ctc_decode
@@ -70,9 +72,11 @@ from keras.src.ops.nn import depthwise_conv
 from keras.src.ops.nn import dot_product_attention
 from keras.src.ops.nn import elu
 from keras.src.ops.nn import gelu
+from keras.src.ops.nn import glu
 from keras.src.ops.nn import hard_sigmoid
 from keras.src.ops.nn import hard_silu
 from keras.src.ops.nn import hard_silu as hard_swish
+from keras.src.ops.nn import hard_tanh
 from keras.src.ops.nn import leaky_relu
 from keras.src.ops.nn import log_sigmoid
 from keras.src.ops.nn import log_softmax

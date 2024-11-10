@@ -1,6 +1,7 @@
 import os
 
 import numpy as np
+import pytest
 
 import keras
 from keras.src import testing
@@ -25,7 +26,6 @@ def get_target_model():
 
 
 class SavingTest(testing.TestCase):
-
     def test_basics(self):
         temp_filepath = os.path.join(self.get_temp_dir(), "my_model.keras")
 
@@ -89,3 +89,24 @@ class SavingTest(testing.TestCase):
         editor.add_weights("dense_2", {"1": np.zeros((3,))})
         out = editor.compare(target_model)  # Succeeds
         self.assertEqual(out["status"], "success")
+
+    @pytest.mark.requires_trainable_backend
+    def test_scalar_weight(self):
+        model = keras.Sequential(name="my_sequential")
+        model.add(keras.Input(shape=(1,), name="my_input"))
+        model.add(keras.layers.Dense(1, activation="sigmoid", name="my_dense"))
+        model.compile(optimizer="adam", loss="mse", metrics=["mae"])
+        model.fit(np.array([[1]]), np.array([[1]]), verbose=0)
+        model_fpath = os.path.join(self.get_temp_dir(), "model.keras")
+        weights_fpath = os.path.join(self.get_temp_dir(), "model.weights.h5")
+        model.save(model_fpath)
+        model.save_weights(weights_fpath)
+
+        model_editor = KerasFileEditor(model_fpath)
+        self.assertEqual(
+            len(keras.src.tree.flatten(model_editor.weights_dict)), 8
+        )
+        model_weights_editor = KerasFileEditor(weights_fpath)
+        self.assertEqual(
+            len(keras.src.tree.flatten(model_weights_editor.weights_dict)), 8
+        )

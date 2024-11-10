@@ -214,14 +214,18 @@ class Functional(Function, Model):
 
     def _maybe_warn_inputs_struct_mismatch(self, inputs):
         try:
+            # We first normalize to tuples before performing the check to
+            # suppress warnings when encountering mismatched tuples and lists.
             tree.assert_same_structure(
-                inputs, self._inputs_struct, check_types=False
+                tree.lists_to_tuples(inputs),
+                tree.lists_to_tuples(self._inputs_struct),
+                check_types=False,
             )
         except:
             model_inputs_struct = tree.map_structure(
                 lambda x: x.name, self._inputs_struct
             )
-            inputs_struct = tree.map_structure(lambda x: "*", inputs)
+            inputs_struct = tree.map_structure(lambda x: f"type({x})", inputs)
             warnings.warn(
                 "The structure of `inputs` doesn't match the expected "
                 f"structure: {model_inputs_struct}. "
@@ -699,7 +703,7 @@ def deserialize_node(node_data, created_layers):
             inbound_node_index = history[1]
             inbound_tensor_index = history[2]
             if len(layer._inbound_nodes) <= inbound_node_index:
-                raise ValueError(
+                raise IndexError(
                     "Layer node index out of bounds.\n"
                     f"inbound_layer = {layer}\n"
                     f"inbound_layer._inbound_nodes = {layer._inbound_nodes}\n"
