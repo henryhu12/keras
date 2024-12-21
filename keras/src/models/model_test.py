@@ -1,3 +1,4 @@
+import os
 import pickle
 from collections import namedtuple
 
@@ -661,10 +662,11 @@ class ModelTest(testing.TestCase):
                 "output_c": "binary_crossentropy",
             },
         )
+
         # Fit the model to make sure compile_metrics are built
         with self.assertRaisesRegex(
-            KeyError,
-            "in the `loss` argument, can't be found in the model's output",
+            ValueError,
+            "Expected keys",
         ):
             model.fit(x, (y1, y2), batch_size=2, epochs=1, verbose=0)
 
@@ -680,8 +682,8 @@ class ModelTest(testing.TestCase):
         )
         # Fit the model to make sure compile_metrics are built
         with self.assertRaisesRegex(
-            KeyError,
-            "in the `loss` argument, can't be found in the model's output",
+            ValueError,
+            "Expected keys",
         ):
             model.fit(x, (y1, y2), batch_size=2, epochs=1, verbose=0)
 
@@ -986,8 +988,8 @@ class ModelTest(testing.TestCase):
 
     def get_struct_loss(self, structure):
         def loss_fn(y_true, y_pred):
-            tree.assert_same_structure(structure, y_true, check_types=False)
-            tree.assert_same_structure(structure, y_pred, check_types=False)
+            tree.assert_same_structure(structure, y_true)
+            tree.assert_same_structure(structure, y_pred)
             tree.map_structure(
                 lambda spec, tensor: self.assertEqual(spec.ndim, tensor.ndim),
                 structure,
@@ -1043,7 +1045,7 @@ class ModelTest(testing.TestCase):
 
         if _type is other_type:
             with self.assertRaisesRegex(
-                ValueError, "don't have the same structure"
+                ValueError, "[Ee]xpected.*" + _type.__name__
             ):
                 model.fit(x, y, batch_size=2, epochs=1, verbose=0)
         else:
@@ -1216,3 +1218,47 @@ class ModelTest(testing.TestCase):
             ]
         )
         self.assertListEqual(hist_keys, ref_keys)
+
+    @pytest.mark.skipif(
+        backend.backend() not in ("tensorflow", "jax"),
+        reason=(
+            "Currently, `Model.export` only supports the tensorflow and jax"
+            " backends."
+        ),
+    )
+    @pytest.mark.skipif(
+        testing.jax_uses_gpu(), reason="Leads to core dumps on CI"
+    )
+    def test_export(self):
+        import tensorflow as tf
+
+        temp_filepath = os.path.join(self.get_temp_dir(), "exported_model")
+        model = _get_model()
+        x1 = np.random.rand(2, 3)
+        x2 = np.random.rand(2, 3)
+        ref_output = model([x1, x2])
+
+        model.export(temp_filepath)
+        revived_model = tf.saved_model.load(temp_filepath)
+        self.assertAllClose(ref_output, revived_model.serve([x1, x2]))
+
+        # Test with a different batch size
+        revived_model.serve(
+            [np.concatenate([x1, x1], axis=0), np.concatenate([x2, x2], axis=0)]
+        )
+
+    def test_export_error(self):
+        temp_filepath = os.path.join(self.get_temp_dir(), "exported_model")
+        model = _get_model()
+
+        # Bad format
+        with self.assertRaisesRegex(ValueError, "Unrecognized format="):
+            model.export(temp_filepath, format="bad_format")
+
+        # Bad backend
+        if backend.backend() not in ("tensorflow", "jax"):
+            with self.assertRaisesRegex(
+                NotImplementedError,
+                "The export API is only compatible with JAX and TF backends.",
+            ):
+                model.export(temp_filepath)

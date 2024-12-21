@@ -30,6 +30,8 @@ elif backend.backend() == "tensorflow":
     )
 elif backend.backend() == "numpy":
     from keras.src.backend.numpy.trainer import NumpyTrainer as Trainer
+elif backend.backend() == "openvino":
+    from keras.src.backend.openvino.trainer import OpenVINOTrainer as Trainer
 else:
     raise ImportError(f"Invalid backend: {backend.backend()}")
 
@@ -407,6 +409,38 @@ class TestTrainer(testing.TestCase):
         self.assertEqual(new_model.metrics[0], new_model._loss_tracker)
         self.assertEqual(new_model.metrics[1], new_model._compile_metrics)
 
+    def test_multiple_compiles(self):
+        # https://github.com/keras-team/keras/issues/20474
+        model1 = ExampleModel(units=3)
+        model2 = ExampleModel(units=3)
+        model1.compile(
+            optimizer=optimizers.SGD(),
+            loss=losses.MeanSquaredError(),
+            metrics=[metrics.MeanSquaredError()],
+        )
+
+        # Combine these 2 models into `combined`.
+        inputs = keras.Input(shape=(4,))
+        x = model1(inputs)
+        outputs = model2(x)
+        combined = models.Model(inputs, outputs)
+        combined.compile(
+            optimizer=optimizers.SGD(),
+            loss=losses.MeanSquaredError(),
+            metrics=[metrics.MeanSquaredError()],
+        )
+
+        self.assertLen(model1.metrics, 2)
+        self.assertIsNotNone(model1._loss_tracker)
+        self.assertEqual(model1.metrics[0], model1._loss_tracker)
+        self.assertEqual(model1.metrics[1], model1._compile_metrics)
+
+        # `combined.metrics` will not include `model1.metrics`.
+        self.assertLen(combined.metrics, 2)
+        self.assertIsNotNone(combined._loss_tracker)
+        self.assertEqual(combined.metrics[0], combined._loss_tracker)
+        self.assertEqual(combined.metrics[1], combined._compile_metrics)
+
     @pytest.mark.skipif(
         backend.backend() != "torch",
         reason="torch backend runs in eager mode for jit_compile='auto'",
@@ -491,15 +525,35 @@ class TestTrainer(testing.TestCase):
                 "dataset_type": "py_dataset",
             },
             {
+                "testcase_name": "py_dataset_cw",
+                "dataset_type": "py_dataset",
+                "fit_kwargs": {"class_weight": {0: 1, 1: 2}},
+            },
+            {
                 "testcase_name": "py_dataset_infinite",
                 "dataset_type": "py_dataset",
                 "dataset_kwargs": {"infinite": True},
                 "fit_kwargs": {"steps_per_epoch": 20},
             },
             {
+                "testcase_name": "py_dataset_infinite_cw",
+                "dataset_type": "py_dataset",
+                "dataset_kwargs": {"infinite": True},
+                "fit_kwargs": {
+                    "steps_per_epoch": 20,
+                    "class_weight": {0: 1, 1: 2},
+                },
+            },
+            {
                 "testcase_name": "py_dataset_multithreading",
                 "dataset_type": "py_dataset",
                 "dataset_kwargs": {"workers": 2},
+            },
+            {
+                "testcase_name": "py_dataset_multithreading_cw",
+                "dataset_type": "py_dataset",
+                "dataset_kwargs": {"workers": 2},
+                "fit_kwargs": {"class_weight": {0: 1, 1: 2}},
             },
             {
                 "testcase_name": "py_dataset_multithreading_infinite",
@@ -511,6 +565,12 @@ class TestTrainer(testing.TestCase):
                 "testcase_name": "py_dataset_multiprocessing",
                 "dataset_type": "py_dataset",
                 "dataset_kwargs": {"workers": 2, "use_multiprocessing": True},
+            },
+            {
+                "testcase_name": "py_dataset_multiprocessing_cw",
+                "dataset_type": "py_dataset",
+                "dataset_kwargs": {"workers": 2, "use_multiprocessing": True},
+                "fit_kwargs": {"class_weight": {0: 1, 1: 2}},
             },
             {
                 "testcase_name": "py_dataset_multiprocessing_infinite",
@@ -2713,50 +2773,3 @@ class TestTrainer(testing.TestCase):
             verbose=0,
         )
         self.assertLessEqual(tracing_count[0], 2)
-
-
-class TrainerDistributeTest(testing.TestCase):
-    @pytest.mark.skipif(
-        backend.backend() != "tensorflow", reason="Requires tf.distribute"
-    )
-    def test_end_to_end_tf_distribute(self):
-        import tensorflow as tf
-        from tensorflow.python.eager import context
-
-        context._reset_context()
-        cpus = tf.config.list_physical_devices("CPU")
-        tf.config.set_logical_device_configuration(
-            cpus[0],
-            [
-                tf.config.LogicalDeviceConfiguration(),
-                tf.config.LogicalDeviceConfiguration(),
-            ],
-        )
-        strategy = tf.distribute.MirroredStrategy(["CPU:0", "CPU:1"])
-        with strategy.scope():
-            model = keras.Sequential(
-                [
-                    keras.Input((2,)),
-                    keras.layers.Dense(
-                        2,
-                        activation="softmax",
-                        use_bias=False,
-                        kernel_initializer="ones",
-                    ),
-                ]
-            )
-            model.compile(
-                optimizer="sgd",
-                loss="sparse_categorical_crossentropy",
-                metrics=["sparse_categorical_accuracy"],
-            )
-        x = (np.arange(512) / 128).reshape((256, 2))
-        y = (np.arange(256) % 2).reshape((256, 1))
-        out_fit = model.fit(x, y)
-        self.assertLess(out_fit.history["sparse_categorical_accuracy"][0], 0.6)
-        out_eval = model.evaluate(x, y)
-        self.assertLess(out_eval[1], 0.6)
-        out_predict = model.predict(x)
-        self.assertEqual(out_predict.shape, (256, 2))
-
-        context._reset_context()

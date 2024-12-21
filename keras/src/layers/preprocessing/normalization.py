@@ -190,8 +190,8 @@ class Normalization(TFDataLayer):
             # with proper broadcast shape for use during call.
             mean = ops.convert_to_tensor(self.input_mean)
             variance = ops.convert_to_tensor(self.input_variance)
-            mean = ops.reshape(mean, self._broadcast_shape)
-            variance = ops.reshape(variance, self._broadcast_shape)
+            mean = ops.broadcast_to(mean, self._broadcast_shape)
+            variance = ops.broadcast_to(variance, self._broadcast_shape)
             self.mean = ops.cast(mean, dtype=self.compute_dtype)
             self.variance = ops.cast(variance, dtype=self.compute_dtype)
             self.built = True
@@ -278,7 +278,7 @@ class Normalization(TFDataLayer):
                 ) * batch_weight
                 total_mean = new_total_mean
         else:
-            raise NotImplementedError(type(data))
+            raise NotImplementedError(f"Unsupported data type: {type(data)}")
 
         self.adapt_mean.assign(total_mean)
         self.adapt_variance.assign(total_var)

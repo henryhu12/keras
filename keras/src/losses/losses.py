@@ -44,6 +44,9 @@ class LossFunctionWrapper(Loss):
             config = serialization_lib.deserialize_keras_object(config)
         return cls(**config)
 
+    def __repr__(self):
+        return f"<LossFunctionWrapper({self.fn}, kwargs={self._fn_kwargs})>"
+
 
 @keras_export("keras.losses.MeanSquaredError")
 class MeanSquaredError(LossFunctionWrapper):
@@ -769,8 +772,8 @@ class BinaryFocalCrossentropy(LossFunctionWrapper):
     As a standalone function:
 
     >>> # Example 1: (batch_size = 1, number of samples = 4)
-    >>> y_true = [0, 1, 0, 0]
-    >>> y_pred = [-18.6, 0.51, 2.94, -12.8]
+    >>> y_true = np.array([0, 1, 0, 0])
+    >>> y_pred = np.array([-18.6, 0.51, 2.94, -12.8])
     >>> loss = keras.losses.BinaryFocalCrossentropy(
     ...    gamma=2, from_logits=True)
     >>> loss(y_true, y_pred)
@@ -783,8 +786,8 @@ class BinaryFocalCrossentropy(LossFunctionWrapper):
     0.51
 
     >>> # Example 2: (batch_size = 2, number of samples = 4)
-    >>> y_true = [[0, 1], [0, 0]]
-    >>> y_pred = [[-18.6, 0.51], [2.94, -12.8]]
+    >>> y_true = np.array([[0, 1], [0, 0]])
+    >>> y_pred = np.array([[-18.6, 0.51], [2.94, -12.8]])
     >>> # Using default 'auto'/'sum_over_batch_size' reduction type.
     >>> loss = keras.losses.BinaryFocalCrossentropy(
     ...     gamma=3, from_logits=True)
@@ -923,8 +926,8 @@ class CategoricalCrossentropy(LossFunctionWrapper):
 
     Standalone usage:
 
-    >>> y_true = [[0, 1, 0], [0, 0, 1]]
-    >>> y_pred = [[0.05, 0.95, 0], [0.1, 0.8, 0.1]]
+    >>> y_true = np.array([[0, 1, 0], [0, 0, 1]])
+    >>> y_pred = np.array([[0.05, 0.95, 0], [0.1, 0.8, 0.1]])
     >>> # Using 'auto'/'sum_over_batch_size' reduction type.
     >>> cce = keras.losses.CategoricalCrossentropy()
     >>> cce(y_true, y_pred)
@@ -1385,6 +1388,7 @@ class Tversky(LossFunctionWrapper):
         beta=0.5,
         reduction="sum_over_batch_size",
         name="tversky",
+        axis=None,
         dtype=None,
     ):
         super().__init__(
@@ -1394,13 +1398,17 @@ class Tversky(LossFunctionWrapper):
             dtype=dtype,
             alpha=alpha,
             beta=beta,
+            axis=axis,
         )
         self.alpha = alpha
         self.beta = beta
+        self.axis = axis
 
     def get_config(self):
         config = Loss.get_config(self)
-        config.update({"alpha": self.alpha, "beta": self.beta})
+        config.update(
+            {"alpha": self.alpha, "beta": self.beta, "axis": self.axis}
+        )
         return config
 
 
@@ -2462,7 +2470,7 @@ def dice(y_true, y_pred, axis=None):
 
 
 @keras_export("keras.losses.tversky")
-def tversky(y_true, y_pred, alpha=0.5, beta=0.5):
+def tversky(y_true, y_pred, alpha=0.5, beta=0.5, axis=None):
     """Computes the Tversky loss value between `y_true` and `y_pred`.
 
     This loss function is weighted by the alpha and beta coefficients
@@ -2476,6 +2484,7 @@ def tversky(y_true, y_pred, alpha=0.5, beta=0.5):
         y_pred: tensor of predicted targets.
         alpha: coefficient controlling incidence of false positives.
         beta: coefficient controlling incidence of false negatives.
+        axis: tuple for which dimensions the loss is calculated.
 
     Returns:
         Tversky loss value.
@@ -2487,12 +2496,13 @@ def tversky(y_true, y_pred, alpha=0.5, beta=0.5):
     y_pred = ops.convert_to_tensor(y_pred)
     y_true = ops.cast(y_true, y_pred.dtype)
 
-    inputs = ops.reshape(y_true, [-1])
-    targets = ops.reshape(y_pred, [-1])
+    inputs = y_true
+    targets = y_pred
 
-    intersection = ops.sum(inputs * targets)
-    fp = ops.sum((1 - targets) * inputs)
-    fn = ops.sum(targets * (1 - inputs))
+    intersection = ops.sum(inputs * targets, axis=axis)
+    fp = ops.sum((1 - targets) * inputs, axis=axis)
+    fn = ops.sum(targets * (1 - inputs), axis=axis)
+
     tversky = ops.divide(
         intersection,
         intersection + fp * alpha + fn * beta + backend.epsilon(),

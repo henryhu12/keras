@@ -1,5 +1,6 @@
 import numpy as np
 
+from conftest import skip_if_backend
 from keras.src import backend
 from keras.src import initializers
 from keras.src import random
@@ -7,7 +8,7 @@ from keras.src import testing
 from keras.src import utils
 
 
-class InitializersTest(testing.TestCase):
+class RandomInitializersTest(testing.TestCase):
     def test_random_normal(self):
         utils.set_random_seed(1337)
         shape = (25, 20)
@@ -124,11 +125,12 @@ class InitializersTest(testing.TestCase):
         )
         self.run_class_serialization_test(initializer)
 
-    def test_orthogonal_initializer(self):
+    @skip_if_backend("openvino", "openvino backend does not support `qr`")
+    def test_orthogonal(self):
         shape = (5, 5)
         gain = 2.0
         seed = 1234
-        initializer = initializers.OrthogonalInitializer(gain=gain, seed=seed)
+        initializer = initializers.Orthogonal(gain=gain, seed=seed)
         values = initializer(shape=shape)
         self.assertEqual(initializer.seed, seed)
         self.assertEqual(initializer.gain, gain)
@@ -148,9 +150,9 @@ class InitializersTest(testing.TestCase):
 
         self.run_class_serialization_test(initializer)
 
-        # Test legacy class_name
-        initializer = initializers.get("Orthogonal")
-        self.assertIsInstance(initializer, initializers.OrthogonalInitializer)
+        # Test compatible class_name
+        initializer = initializers.get("OrthogonalInitializer")
+        self.assertIsInstance(initializer, initializers.Orthogonal)
 
     def test_get_method(self):
         obj = initializers.get("glorot_normal")
@@ -162,6 +164,9 @@ class InitializersTest(testing.TestCase):
         with self.assertRaises(ValueError):
             initializers.get("typo")
 
+    @skip_if_backend(
+        "openvino", "openvino backend does not support `uniform` with None seed"
+    )
     def test_get_method_with_tensor(self):
         shape = (5, 5)
 
@@ -214,7 +219,7 @@ class InitializersTest(testing.TestCase):
 
     def test_serialization_with_seed_generator(self):
         seed = random.SeedGenerator()
-        initializer = initializers.OrthogonalInitializer(seed=seed)
+        initializer = initializers.Orthogonal(seed=seed)
         self.run_class_serialization_test(initializer)
 
         seed = random.SeedGenerator()

@@ -1,4 +1,3 @@
-import collections
 import math
 import string
 
@@ -10,8 +9,8 @@ from keras.src import initializers
 from keras.src import ops
 from keras.src import regularizers
 from keras.src.api_export import keras_export
+from keras.src.backend.config import is_flash_attention_enabled
 from keras.src.layers.activations.softmax import Softmax
-from keras.src.layers.attention.attention import is_flash_attention_enabled
 from keras.src.layers.core.einsum_dense import EinsumDense
 from keras.src.layers.layer import Layer
 from keras.src.layers.regularization.dropout import Dropout
@@ -53,9 +52,11 @@ class MultiHeadAttention(Layer):
             feature dim (the query input's last dimension).
         attention_axes: axes over which the attention is applied. `None` means
             attention over all axes, but batch, heads, and features.
-        flash_attention: If unspecified, defaults to the global flash attention
-            configuration setting (which can be set via
-            `keras.config.enable_flash_attention().
+        flash_attention: If `None`, the layer attempts to use flash
+            attention for faster and more memory-efficient attention
+            computations when possible. This behavior can be configured using
+            `keras.config.enable_flash_attention()` or
+            `keras.config.disable_flash_attention()`.
         kernel_initializer: Initializer for dense layer kernels.
         bias_initializer: Initializer for dense layer biases.
         kernel_regularizer: Regularizer for dense layer kernels.
@@ -123,12 +124,22 @@ class MultiHeadAttention(Layer):
         self.supports_masking = True
         self._num_heads = num_heads
         self._key_dim = key_dim
-        # Cache 1.0 / math.sqrt(self._key_dim).
-        self._inverse_sqrt_key_dim = None
         self._value_dim = value_dim if value_dim else key_dim
         self._dropout = dropout
         self._use_bias = use_bias
+        if output_shape:
+            if isinstance(output_shape, int):
+                output_shape = (output_shape,)
+            try:
+                output_shape = tuple(output_shape)
+            except:
+                raise ValueError(
+                    f"Invalid `output_shape`: {output_shape}. When "
+                    "specified, the `output_shape` should be of type tuple, "
+                    "list, or int."
+                )
         self._output_shape = output_shape
+        self._flash_attention = flash_attention or is_flash_attention_enabled()
         self._kernel_initializer = initializers.get(kernel_initializer)
         self._bias_initializer = initializers.get(bias_initializer)
         self._kernel_regularizer = regularizers.get(kernel_regularizer)
@@ -136,8 +147,6 @@ class MultiHeadAttention(Layer):
         self._activity_regularizer = regularizers.get(activity_regularizer)
         self._kernel_constraint = constraints.get(kernel_constraint)
         self._bias_constraint = constraints.get(bias_constraint)
-        self._flash_attention = flash_attention or is_flash_attention_enabled()
-
         if isinstance(attention_axes, int):
             attention_axes = (attention_axes,)
         elif attention_axes and not isinstance(attention_axes, (list, tuple)):
@@ -147,6 +156,16 @@ class MultiHeadAttention(Layer):
             )
         self._attention_axes = attention_axes
         self.seed = seed
+
+        self._inverse_sqrt_key_dim = 1.0 / math.sqrt(float(self._key_dim))
+        self._return_attention_scores = False
+
+        # Check for flash attention constraints
+        if self._flash_attention and self._dropout > 0.0:
+            raise ValueError(
+                "Dropout is not supported when flash attention is enabled. "
+                "Please set dropout to 0.0 to use flash attention."
+            )
 
     @property
     def num_heads(self):
@@ -168,9 +187,8 @@ class MultiHeadAttention(Layer):
     def use_bias(self):
         return self._use_bias
 
-    @property
-    def output_shape(self):
-        return self._output_shape
+    # Avoid exposing `output_shape` as it may conflict with `Functional` and
+    # `Sequential` models when calling `summary()`.
 
     @property
     def attention_axes(self):
@@ -335,10 +353,7 @@ class MultiHeadAttention(Layer):
         """
         query_rank = len(query_shape)
         if self._output_shape:
-            if not isinstance(self._output_shape, collections.abc.Sized):
-                output_shape = [self._output_shape]
-            else:
-                output_shape = self._output_shape
+            output_shape = self._output_shape
         else:
             output_shape = [query_shape[-1]]
         einsum_equation, bias_axes, output_rank = _build_proj_equation(
@@ -380,7 +395,6 @@ class MultiHeadAttention(Layer):
         self._dropout_layer = Dropout(
             rate=self._dropout, dtype=self.dtype_policy, seed=self.seed
         )
-        self._inverse_sqrt_key_dim = 1.0 / math.sqrt(float(self._key_dim))
 
     def _masked_softmax(self, attention_scores, attention_mask=None):
         # Normalize the attention scores to probabilities.
@@ -403,7 +417,6 @@ class MultiHeadAttention(Layer):
         query,
         key,
         value,
-        return_attention_scores,
         attention_mask=None,
         training=None,
     ):
@@ -428,25 +441,18 @@ class MultiHeadAttention(Layer):
           attention_output: Multi-headed outputs of attention computation.
           attention_scores: Multi-headed attention weights.
         """
-
         # Check for flash attention constraints
-        if self._flash_attention and return_attention_scores:
+        if self._flash_attention and self._return_attention_scores:
             raise ValueError(
                 "Returning attention scores is not supported when flash "
                 "attention is enabled. Please disable flash attention to access"
                 " attention scores."
             )
-        if self._flash_attention and self._dropout > 0.0:
-            raise ValueError(
-                "Dropout is not supported when flash "
-                "attention is enabled. Please set dropout to 0.0 to use "
-                "flash attention."
-            )
 
         # Determine whether to use dot-product attention
         use_dot_product_attention = not (
             self._dropout > 0.0
-            or return_attention_scores
+            or self._return_attention_scores
             or (len(query.shape) != 4)
         )
 
@@ -454,16 +460,16 @@ class MultiHeadAttention(Layer):
             if attention_mask is not None:
                 # Ensure attention_mask has the correct shape for broadcasting
                 # Expected shape: [batch_size, num_heads, query_seq_len,
-                # key_seq_len]. This is because masked_softmax is not supported
-                # in JAX.
-                while len(attention_mask.shape) < 4:
+                # key_seq_len].
+                mask_expansion_axis = -len(self._attention_axes) * 2 - 1
+                len_attention_scores_shape = 4  # Only accepts 4D inputs
+                for _ in range(
+                    len_attention_scores_shape - len(attention_mask.shape)
+                ):
                     attention_mask = ops.expand_dims(
-                        attention_mask, axis=1
-                    )  # Add dimension for num_heads
-                if attention_mask.shape[1] != self._num_heads:
-                    attention_mask = ops.tile(
-                        attention_mask, [1, self._num_heads, 1, 1]
+                        attention_mask, axis=mask_expansion_axis
                     )
+                attention_mask = ops.cast(attention_mask, dtype="bool")
             # Directly compute the attention output using dot-product attention
             attention_output = ops.dot_product_attention(
                 query=query,
@@ -519,8 +525,17 @@ class MultiHeadAttention(Layer):
         training=None,
         use_causal_mask=False,
     ):
+        self._return_attention_scores = return_attention_scores
         if key is None:
             key = value
+
+        # Delete the masks because the masks are handled at the level of the
+        # layer
+        query_mask = backend.get_keras_mask(query)
+        backend.set_keras_mask(query, None)
+        backend.set_keras_mask(value, None)
+        backend.set_keras_mask(key, None)
+
         attention_mask = self._compute_attention_mask(
             query,
             value,
@@ -533,23 +548,26 @@ class MultiHeadAttention(Layer):
         #   N = `num_attention_heads`
         #   H = `size_per_head`
 
-        # `query` = [B, T, N ,H]
-        query = self._query_dense.call(query)
+        # `query` = [B, T, N, H]
+        query = self._query_dense(query)
 
         # `key` = [B, S, N, H]
-        key = self._key_dense.call(key)
+        key = self._key_dense(key)
 
         # `value` = [B, S, N, H]
-        value = self._value_dense.call(value)
+        value = self._value_dense(value)
         attention_output, attention_scores = self._compute_attention(
             query,
             key,
             value,
-            return_attention_scores,
             attention_mask,
             training,
         )
-        attention_output = self._output_dense.call(attention_output)
+        attention_output = self._output_dense(attention_output)
+
+        # Set mask on output if needed
+        if query_mask is not None:
+            backend.set_keras_mask(attention_output, query_mask)
 
         if return_attention_scores:
             return attention_output, attention_scores
@@ -614,12 +632,15 @@ class MultiHeadAttention(Layer):
             # the shape of the causal mask is [1, T, S]
             mask = self._compute_causal_mask(query, value)
             auto_mask = mask if auto_mask is None else auto_mask & mask
+
+        if attention_mask is not None:
+            attention_mask = ops.cast(attention_mask, "bool")
         if auto_mask is not None:
             # merge attention_mask & automatic mask, to shape [B, T, S]
             attention_mask = (
                 auto_mask
                 if attention_mask is None
-                else ops.cast(attention_mask, bool) & auto_mask
+                else attention_mask & auto_mask
             )
         return attention_mask
 
@@ -658,8 +679,12 @@ class MultiHeadAttention(Layer):
         value_shape,
         key_shape=None,
     ):
+        query_shape = tuple(query_shape)
+        value_shape = tuple(value_shape)
         if key_shape is None:
             key_shape = value_shape
+        else:
+            key_shape = tuple(key_shape)
 
         if value_shape[1:-1] != key_shape[1:-1]:
             raise ValueError(
@@ -667,10 +692,8 @@ class MultiHeadAttention(Layer):
                 f"must be equal. Received: value_shape={value_shape} and "
                 f"key_shape={key_shape}"
             )
-
         if self._output_shape:
-            return query_shape[:-1] + self._output_shape
-
+            query_shape = query_shape[:-1] + self._output_shape
         return query_shape
 
     def compute_output_spec(
