@@ -23,6 +23,53 @@ from keras.src.backend.tensorflow.core import convert_to_tensor
 from keras.src.backend.tensorflow.core import shape as shape_op
 
 
+def rot90(array, k=1, axes=(0, 1)):
+    """Rotate an array by 90 degrees in the specified plane."""
+    array = convert_to_tensor(array)
+
+    if array.shape.rank < 2:
+        raise ValueError(
+            f"Input array must have at least 2 dimensions. "
+            f"Received: array.ndim={array.shape.rank}"
+        )
+
+    if len(axes) != 2 or axes[0] == axes[1]:
+        raise ValueError(
+            f"Invalid axes: {axes}. Axes must be a tuple of "
+            "two different dimensions."
+        )
+
+    k = k % 4
+    if k == 0:
+        return array
+
+    axes = tuple(
+        axis if axis >= 0 else array.shape.rank + axis for axis in axes
+    )
+
+    perm = [i for i in range(array.shape.rank) if i not in axes]
+    perm.extend(axes)
+    array = tf.transpose(array, perm)
+
+    shape = tf.shape(array)
+    non_rot_shape = shape[:-2]
+    rot_shape = shape[-2:]
+
+    array = tf.reshape(array, tf.concat([[-1], rot_shape], axis=0))
+
+    for _ in range(k):
+        array = tf.transpose(array, [0, 2, 1])
+        array = tf.reverse(array, axis=[1])
+    array = tf.reshape(array, tf.concat([non_rot_shape, rot_shape], axis=0))
+
+    inv_perm = [0] * len(perm)
+    for i, p in enumerate(perm):
+        inv_perm[p] = i
+    array = tf.transpose(array, inv_perm)
+
+    return array
+
+
 @sparse.elementwise_binary_union(tf.sparse.add)
 def add(x1, x2):
     if not isinstance(x1, (int, float)):
@@ -790,12 +837,39 @@ def _keepdims(x, y, axis):
 
 
 def argmax(x, axis=None, keepdims=False):
-    _x = x
+    x_float = tf.cast(x, tf.float32)
+    is_negative_zero = tf.logical_and(
+        tf.equal(x_float, 0.0),
+        tf.less(
+            tf.bitwise.bitwise_and(
+                tf.bitcast(x_float, tf.int32),
+                # tf.float32 sign bit
+                tf.constant(0x80000000, dtype=tf.int32),
+            ),
+            0,
+        ),
+    )
+    non_zero_mask = tf.not_equal(x_float, 0.0)
+    masked_abs = (
+        tf.abs(x_float)
+        + (1.0 - tf.cast(non_zero_mask, tf.float32)) * tf.float32.max
+    )
+    min_non_zero = tf.reduce_min(masked_abs) - 1e-9
+    x_adjusted = tf.where(is_negative_zero, -min_non_zero, x_float)
     if axis is None:
-        x = tf.reshape(x, [-1])
-    y = tf.argmax(x, axis=axis, output_type="int32")
-    if keepdims:
-        y = _keepdims(_x, y, axis)
+        x_adjusted = tf.reshape(x_adjusted, [-1])
+        y = tf.argmax(x_adjusted, axis=0, output_type=tf.int32)
+        if keepdims:
+            y = tf.reshape(y, [1, 1])
+    else:
+        rank = tf.rank(x_adjusted)
+        axis_tensor = tf.convert_to_tensor(axis, dtype=tf.int32)
+        positive_axis = tf.cond(
+            axis_tensor < 0, lambda: axis_tensor + rank, lambda: axis_tensor
+        )
+        y = tf.argmax(x_adjusted, axis=positive_axis, output_type=tf.int32)
+        if keepdims:
+            y = tf.expand_dims(y, axis=positive_axis)
     return y
 
 
@@ -2469,8 +2543,7 @@ def squeeze(x, axis=None):
         for a in axis:
             if static_shape[a] != 1:
                 raise ValueError(
-                    f"Cannot squeeze axis={a}, because the "
-                    "dimension is not 1."
+                    f"Cannot squeeze axis={a}, because the dimension is not 1."
                 )
         axis = sorted([canonicalize_axis(a, len(static_shape)) for a in axis])
     if isinstance(x, tf.SparseTensor):

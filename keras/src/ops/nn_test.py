@@ -1597,6 +1597,18 @@ class NNOpsCorrectnessTest(testing.TestCase):
             knn.average_pool(x, 2, (2, 1), padding="same"),
             np_avgpool2d(x, 2, (2, 1), padding="same", data_format=data_format),
         )
+        # Test 2D average pooling with different pool size.
+        if data_format == "channels_last":
+            input_shape = (2, 10, 9, 3)
+        else:
+            input_shape = (2, 3, 10, 9)
+        x = np.arange(540, dtype=float).reshape(input_shape)
+        self.assertAllClose(
+            knn.average_pool(x, (2, 3), (3, 3), padding="same"),
+            np_avgpool2d(
+                x, (2, 3), (3, 3), padding="same", data_format=data_format
+            ),
+        )
 
     @parameterized.product(
         strides=(1, 2, 3),
@@ -2474,7 +2486,7 @@ class NNOpsDtypeTest(testing.TestCase):
         self.jax_enable_x64.__enter__()
         return super().setUp()
 
-    def tearDown(self) -> None:
+    def tearDown(self):
         self.jax_enable_x64.__exit__(None, None, None)
         return super().tearDown()
 

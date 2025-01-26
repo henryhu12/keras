@@ -49,8 +49,7 @@ class RandomGrayscale(BaseImagePreprocessingLayer):
         super().__init__(**kwargs)
         if factor < 0 or factor > 1:
             raise ValueError(
-                "`factor` should be between 0 and 1. "
-                f"Received: factor={factor}"
+                f"`factor` should be between 0 and 1. Received: factor={factor}"
             )
         self.factor = factor
         self.data_format = backend.standardize_data_format(data_format)
@@ -71,17 +70,21 @@ class RandomGrayscale(BaseImagePreprocessingLayer):
         )
         return should_apply
 
-    def transform_images(self, images, transformations=None, **kwargs):
-        should_apply = (
-            transformations
-            if transformations is not None
-            else self.get_random_transformation(images)
-        )
+    def transform_images(self, images, transformation, training=True):
+        if training:
+            should_apply = (
+                transformation
+                if transformation is not None
+                else self.get_random_transformation(images)
+            )
 
-        grayscale_images = self.backend.image.rgb_to_grayscale(
-            images, data_format=self.data_format
-        )
-        return self.backend.numpy.where(should_apply, grayscale_images, images)
+            grayscale_images = self.backend.image.rgb_to_grayscale(
+                images, data_format=self.data_format
+            )
+            return self.backend.numpy.where(
+                should_apply, grayscale_images, images
+            )
+        return images
 
     def compute_output_shape(self, input_shape):
         return input_shape

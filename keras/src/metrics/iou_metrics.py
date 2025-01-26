@@ -354,8 +354,6 @@ class BinaryIoU(IoU):
 
     Example:
 
-    Example:
-
     >>> m = keras.metrics.BinaryIoU(target_class_ids=[0, 1], threshold=0.3)
     >>> m.update_state([0, 1, 0, 1], [0.1, 0.2, 0.4, 0.7])
     >>> m.result()
@@ -474,7 +472,6 @@ class MeanIoU(IoU):
             is used to determine each sample's most likely associated label.
         axis: (Optional) The dimension containing the logits. Defaults to `-1`.
 
-    Example:
 
     Example:
 

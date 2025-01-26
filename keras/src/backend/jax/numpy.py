@@ -15,6 +15,21 @@ from keras.src.backend.jax.core import cast
 from keras.src.backend.jax.core import convert_to_tensor
 
 
+def rot90(array, k=1, axes=(0, 1)):
+    """Rotate an array by 90 degrees in the specified plane."""
+    if array.ndim < 2:
+        raise ValueError(
+            f"Input array must have at least 2 dimensions. "
+            f"Received: array.ndim={array.ndim}"
+        )
+    if len(axes) != 2 or axes[0] == axes[1]:
+        raise ValueError(
+            f"Invalid axes: {axes}. Axes must be a tuple of "
+            "two different dimensions."
+        )
+    return jnp.rot90(array, k=k, axes=axes)
+
+
 @sparse.elementwise_binary_union(linear=True, use_sparsify=True)
 def add(x1, x2):
     x1 = convert_to_tensor(x1)
@@ -338,11 +353,31 @@ def arctanh(x):
 
 
 def argmax(x, axis=None, keepdims=False):
-    return jnp.argmax(x, axis=axis, keepdims=keepdims)
+    if x.ndim == 0:
+        return jnp.argmax(x, axis=axis, keepdims=keepdims)
+    x_float = x.astype(jnp.float32)
+    is_negative_zero = (x_float == 0.0) & jnp.signbit(x_float)
+    x_adjusted = jnp.where(
+        is_negative_zero, -jnp.finfo(x_float.dtype).tiny, x_float
+    )
+    return jnp.argmax(x_adjusted, axis=axis, keepdims=keepdims)
 
 
 def argmin(x, axis=None, keepdims=False):
-    return jnp.argmin(x, axis=axis, keepdims=keepdims)
+    x_64 = jnp.asarray(x, dtype=jnp.float64)
+    if axis is not None:
+        min_mask = x_64 == jnp.min(x_64, axis=axis, keepdims=True)
+        indices = jnp.argmin(
+            jnp.where(min_mask, x_64, jnp.inf), axis=axis, keepdims=keepdims
+        ).astype("int32")
+    else:
+        min_mask = (x_64 < x_64.min()) | (
+            (x_64 == x_64.min()) & (jnp.signbit(x_64))
+        )
+        indices = jnp.argmin(
+            jnp.where(min_mask, x_64, jnp.inf), axis=axis, keepdims=keepdims
+        ).astype("int32")
+    return indices
 
 
 def argsort(x, axis=-1):

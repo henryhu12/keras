@@ -83,12 +83,14 @@ from keras.src.layers.preprocessing.category_encoding import CategoryEncoding
 from keras.src.layers.preprocessing.discretization import Discretization
 from keras.src.layers.preprocessing.hashed_crossing import HashedCrossing
 from keras.src.layers.preprocessing.hashing import Hashing
+from keras.src.layers.preprocessing.image_preprocessing.aug_mix import AugMix
 from keras.src.layers.preprocessing.image_preprocessing.auto_contrast import (
     AutoContrast,
 )
 from keras.src.layers.preprocessing.image_preprocessing.center_crop import (
     CenterCrop,
 )
+from keras.src.layers.preprocessing.image_preprocessing.cut_mix import CutMix
 from keras.src.layers.preprocessing.image_preprocessing.equalization import (
     Equalization,
 )
@@ -96,14 +98,26 @@ from keras.src.layers.preprocessing.image_preprocessing.max_num_bounding_box imp
     MaxNumBoundingBoxes,
 )
 from keras.src.layers.preprocessing.image_preprocessing.mix_up import MixUp
+from keras.src.layers.preprocessing.image_preprocessing.rand_augment import (
+    RandAugment,
+)
 from keras.src.layers.preprocessing.image_preprocessing.random_brightness import (
     RandomBrightness,
+)
+from keras.src.layers.preprocessing.image_preprocessing.random_color_degeneration import (
+    RandomColorDegeneration,
+)
+from keras.src.layers.preprocessing.image_preprocessing.random_color_jitter import (
+    RandomColorJitter,
 )
 from keras.src.layers.preprocessing.image_preprocessing.random_contrast import (
     RandomContrast,
 )
 from keras.src.layers.preprocessing.image_preprocessing.random_crop import (
     RandomCrop,
+)
+from keras.src.layers.preprocessing.image_preprocessing.random_erasing import (
+    RandomErasing,
 )
 from keras.src.layers.preprocessing.image_preprocessing.random_flip import (
     RandomFlip,
@@ -114,11 +128,23 @@ from keras.src.layers.preprocessing.image_preprocessing.random_grayscale import 
 from keras.src.layers.preprocessing.image_preprocessing.random_hue import (
     RandomHue,
 )
+from keras.src.layers.preprocessing.image_preprocessing.random_invert import (
+    RandomInvert,
+)
+from keras.src.layers.preprocessing.image_preprocessing.random_posterization import (
+    RandomPosterization,
+)
 from keras.src.layers.preprocessing.image_preprocessing.random_rotation import (
     RandomRotation,
 )
 from keras.src.layers.preprocessing.image_preprocessing.random_saturation import (
     RandomSaturation,
+)
+from keras.src.layers.preprocessing.image_preprocessing.random_sharpness import (
+    RandomSharpness,
+)
+from keras.src.layers.preprocessing.image_preprocessing.random_shear import (
+    RandomShear,
 )
 from keras.src.layers.preprocessing.image_preprocessing.random_translation import (
     RandomTranslation,

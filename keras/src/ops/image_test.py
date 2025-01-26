@@ -20,7 +20,7 @@ class ImageOpsDynamicShapeTest(testing.TestCase):
         backend.set_image_data_format("channels_last")
         return super().setUp()
 
-    def tearDown(self) -> None:
+    def tearDown(self):
         backend.set_image_data_format(self.data_format)
         return super().tearDown()
 
@@ -171,7 +171,7 @@ class ImageOpsStaticShapeTest(testing.TestCase):
         backend.set_image_data_format("channels_last")
         return super().setUp()
 
-    def tearDown(self) -> None:
+    def tearDown(self):
         backend.set_image_data_format(self.data_format)
         return super().tearDown()
 
@@ -260,6 +260,58 @@ class ImageOpsStaticShapeTest(testing.TestCase):
         coordinates = KerasTensor([3, 15, 15, 3])
         out = kimage.map_coordinates(input, coordinates, 0)
         self.assertEqual(out.shape, coordinates.shape[1:])
+
+    def test_map_coordinates_uint8(self):
+        image_uint8 = tf.ones((1, 1, 3), dtype=tf.uint8)
+        coordinates = tf.convert_to_tensor([-1.0, 0.0, 0.0])[..., None, None]
+
+        if backend.backend() != "tensorflow":
+            pytest.skip("Skipping test because the backend is not TensorFlow.")
+
+        out = kimage.map_coordinates(
+            image_uint8, coordinates, order=1, fill_mode="constant"
+        )
+        assert out.shape == coordinates.shape[1:]
+
+    def test_map_coordinates_float32(self):
+        image_float32 = tf.ones((1, 1, 3), dtype=tf.float32)
+        coordinates = tf.convert_to_tensor([-1.0, 0.0, 0.0])[..., None, None]
+
+        if backend.backend() != "tensorflow":
+            pytest.skip("Skipping test because the backend is not TensorFlow.")
+
+        out = kimage.map_coordinates(
+            image_float32, coordinates, order=1, fill_mode="constant"
+        )
+        assert out.shape == coordinates.shape[1:]
+
+    def test_map_coordinates_nearest(self):
+        image_uint8 = tf.ones((1, 1, 3), dtype=tf.uint8)
+        coordinates = tf.convert_to_tensor([-1.0, 0.0, 0.0])[..., None, None]
+
+        if backend.backend() != "tensorflow":
+            pytest.skip("Skipping test because the backend is not TensorFlow.")
+
+        out = kimage.map_coordinates(
+            image_uint8, coordinates, order=1, fill_mode="nearest"
+        )
+        assert out.shape == coordinates.shape[1:]
+
+    def test_map_coordinates_manual_cast(self):
+        image_uint8 = tf.ones((1, 1, 3), dtype=tf.uint8)
+        coordinates = tf.convert_to_tensor([-1.0, 0.0, 0.0])[..., None, None]
+        image_uint8_casted = tf.cast(image_uint8, dtype=tf.float32)
+
+        if backend.backend() != "tensorflow":
+            pytest.skip("Skipping test because the backend is not TensorFlow.")
+
+        out = tf.cast(
+            kimage.map_coordinates(
+                image_uint8_casted, coordinates, order=1, fill_mode="constant"
+            ),
+            dtype=tf.uint8,
+        )
+        assert out.shape == coordinates.shape[1:]
 
     def test_pad_images(self):
         # Test channels_last
@@ -396,7 +448,7 @@ class ImageOpsCorrectnessTest(testing.TestCase):
         backend.set_image_data_format("channels_last")
         return super().setUp()
 
-    def tearDown(self) -> None:
+    def tearDown(self):
         backend.set_image_data_format(self.data_format)
         return super().tearDown()
 
@@ -738,6 +790,31 @@ class ImageOpsCorrectnessTest(testing.TestCase):
             x, size=(25, 25), pad_to_aspect_ratio=True, fill_value=fill_value
         )
         self.assertEqual(out.shape, (2, 3, 25, 25))
+
+        x = np.ones((2, 3, 10, 10)) * 128
+        out = kimage.resize(
+            x, size=(4, 4), pad_to_aspect_ratio=True, fill_value=fill_value
+        )
+        self.assertEqual(out.shape, (2, 3, 4, 4))
+        self.assertAllClose(out[:, 0, :, :], np.ones((2, 4, 4)) * 128)
+
+        x = np.ones((2, 3, 10, 8)) * 128
+        out = kimage.resize(
+            x, size=(4, 4), pad_to_aspect_ratio=True, fill_value=fill_value
+        )
+        self.assertEqual(out.shape, (2, 3, 4, 4))
+        self.assertAllClose(
+            out,
+            np.concatenate(
+                [
+                    np.ones((2, 3, 4, 1)) * 96.25,
+                    np.ones((2, 3, 4, 2)) * 128.0,
+                    np.ones((2, 3, 4, 1)) * 96.25,
+                ],
+                axis=3,
+            ),
+            atol=1.0,
+        )
 
     @parameterized.named_parameters(
         named_product(
@@ -1144,7 +1221,7 @@ class ImageOpsBehaviorTests(testing.TestCase):
         backend.set_image_data_format("channels_last")
         return super().setUp()
 
-    def tearDown(self) -> None:
+    def tearDown(self):
         backend.set_image_data_format(self.data_format)
         return super().tearDown()
 

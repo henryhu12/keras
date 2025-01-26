@@ -8,6 +8,21 @@ from keras.src.backend.common.backend_utils import standardize_axis_for_numpy
 from keras.src.backend.numpy.core import convert_to_tensor
 
 
+def rot90(array, k=1, axes=(0, 1)):
+    """Rotate an array by 90 degrees in the specified plane."""
+    if array.ndim < 2:
+        raise ValueError(
+            "Input array must have at least 2 dimensions. "
+            f"Received: array.ndim={array.ndim}"
+        )
+    if len(axes) != 2 or axes[0] == axes[1]:
+        raise ValueError(
+            f"Invalid axes: {axes}. Axes must be a tuple "
+            "of two different dimensions."
+        )
+    return np.rot90(array, k=k, axes=axes)
+
+
 def add(x1, x2):
     if not isinstance(x1, (int, float)):
         x1 = convert_to_tensor(x1)
@@ -230,13 +245,32 @@ def arctanh(x):
 
 
 def argmax(x, axis=None, keepdims=False):
-    axis = standardize_axis_for_numpy(axis)
-    return np.argmax(x, axis=axis, keepdims=keepdims).astype("int32")
+    if x.ndim == 0:
+        return np.argmax(x, axis=axis, keepdims=keepdims).astype("int32")
+    x_float = x.astype(np.float32)
+    is_negative_zero = (x_float == 0.0) & np.signbit(x_float)
+    x_adjusted = np.where(
+        is_negative_zero, -np.finfo(x_float.dtype).tiny, x_float
+    )
+    return np.argmax(x_adjusted, axis=axis, keepdims=keepdims).astype("int32")
 
 
 def argmin(x, axis=None, keepdims=False):
     axis = standardize_axis_for_numpy(axis)
-    return np.argmin(x, axis=axis, keepdims=keepdims).astype("int32")
+    x_64 = np.asarray(x, dtype=np.float64)
+    if axis is not None:
+        min_mask = x_64 == np.min(x_64, axis=axis, keepdims=True)
+        indices = np.argmin(
+            np.where(min_mask, x_64, np.inf), axis=axis, keepdims=keepdims
+        ).astype("int32")
+    else:
+        min_mask = (x_64 < x_64.min()) | (
+            (x_64 == x_64.min()) & (np.signbit(x_64))
+        )
+        indices = np.argmin(
+            np.where(min_mask, x_64, np.inf), axis=axis, keepdims=keepdims
+        ).astype("int32")
+    return indices
 
 
 def argsort(x, axis=-1):
