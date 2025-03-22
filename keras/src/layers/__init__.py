@@ -57,6 +57,7 @@ from keras.src.layers.normalization.group_normalization import (
 from keras.src.layers.normalization.layer_normalization import (
     LayerNormalization,
 )
+from keras.src.layers.normalization.rms_normalization import RMSNormalization
 from keras.src.layers.normalization.spectral_normalization import (
     SpectralNormalization,
 )
@@ -115,6 +116,9 @@ from keras.src.layers.preprocessing.image_preprocessing.random_contrast import (
 )
 from keras.src.layers.preprocessing.image_preprocessing.random_crop import (
     RandomCrop,
+)
+from keras.src.layers.preprocessing.image_preprocessing.random_elastic_transform import (
+    RandomElasticTransform,
 )
 from keras.src.layers.preprocessing.image_preprocessing.random_erasing import (
     RandomErasing,
