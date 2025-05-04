@@ -1,3 +1,5 @@
+import re
+
 from keras.src import ops
 from keras.src.api_export import keras_export
 from keras.src.optimizers import optimizer
@@ -124,10 +126,7 @@ class Muon(optimizer.Optimizer):
         self.ns_steps = ns_steps
         self.nesterov = nesterov
         self.exclude_embeddings = exclude_embeddings
-        # exclude_layers is a keyword at variable path
-        # so it must be a string
-        assert isinstance(exclude_layers, str) or exclude_layers is None
-        self.exclude_layers = exclude_layers.lower()
+        self.exclude_layers = exclude_layers or []
 
     def _should_use_adamw(self, variable):
         # To use it with 4D convolutional filters,
@@ -137,8 +136,9 @@ class Muon(optimizer.Optimizer):
             return True
         if self.exclude_embeddings and "embedding" in variable.path.lower():
             return True
-        if self.exclude_layers in variable.path.lower():
-            return True
+        for keyword in self.exclude_layers:
+            if re.search(keyword, variable.path):
+                return True
         return False
 
     def build(self, var_list):
@@ -160,15 +160,18 @@ class Muon(optimizer.Optimizer):
         self.muon_velocities = {}
 
         for var in var_list:
-            self.adam_momentums[var.path] = self.add_variable_from_reference(
-                reference_variable=var, name="momentum"
-            )
-            if self._should_use_adamw(var):
-                self.adam_velocities[var.path] = (
+            if not self._overwrite_variable_with_gradient(var):
+                self.adam_momentums[var.path] = (
                     self.add_variable_from_reference(
-                        reference_variable=var, name="velocity"
+                        reference_variable=var, name="momentum"
                     )
                 )
+                if self._should_use_adamw(var):
+                    self.adam_velocities[var.path] = (
+                        self.add_variable_from_reference(
+                            reference_variable=var, name="velocity"
+                        )
+                    )
 
     def update_step(self, gradient, variable, learning_rate):
         if self._should_use_adamw(variable):
@@ -237,15 +240,14 @@ class Muon(optimizer.Optimizer):
         return X
 
     def zeropower_via_newtonschulz5(self, x, steps: int):
-        """
-        We apply the Newton-Schulz iteration to compute matrix G.
-        We select a quintic iteration that maximizes the slope at zero.
-        This approach helps minimize steps, even if the iteration doesn't fully
-        converge across the interval.
-        The result isn't exactly UV^T (from the SVD of G),
-        but rather an approximation like US'V^T. Despite this approximation,
-        model performance remains unaffected
-        compared to using the exact UV^T from the SVD.
+        """We apply the Newton-Schulz iteration to compute matrix G.
+
+        We select a quintic iteration that maximizes the slope at zero. This
+        approach helps minimize steps, even if the iteration doesn't fully
+        converge across the interval. The result isn't exactly UV^T (from the
+        SVD of G), but rather an approximation like US'V^T. Despite this
+        approximation, model performance remains unaffected compared to using
+        the exact UV^T from the SVD.
         """
         shape = ops.shape(x)
         assert len(shape) >= 2
