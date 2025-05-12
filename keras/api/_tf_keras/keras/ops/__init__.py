@@ -60,6 +60,8 @@ from keras.src.ops.math import segment_max as segment_max
 from keras.src.ops.math import segment_sum as segment_sum
 from keras.src.ops.math import stft as stft
 from keras.src.ops.math import top_k as top_k
+from keras.src.ops.math import view_as_complex as view_as_complex
+from keras.src.ops.math import view_as_real as view_as_real
 from keras.src.ops.nn import average_pool as average_pool
 from keras.src.ops.nn import batch_normalization as batch_normalization
 from keras.src.ops.nn import binary_crossentropy as binary_crossentropy
@@ -183,6 +185,7 @@ from keras.src.ops.numpy import full_like as full_like
 from keras.src.ops.numpy import get_item as get_item
 from keras.src.ops.numpy import greater as greater
 from keras.src.ops.numpy import greater_equal as greater_equal
+from keras.src.ops.numpy import hamming as hamming
 from keras.src.ops.numpy import histogram as histogram
 from keras.src.ops.numpy import hstack as hstack
 from keras.src.ops.numpy import identity as identity
