@@ -47,6 +47,16 @@ def hamming(x):
     return jnp.hamming(x)
 
 
+def hanning(x):
+    x = convert_to_tensor(x)
+    return jnp.hanning(x)
+
+
+def kaiser(x, beta):
+    x = convert_to_tensor(x)
+    return jnp.kaiser(x, beta)
+
+
 def bincount(x, weights=None, minlength=0, sparse=False):
     # Note: bincount is never tracable / jittable because the output shape
     # depends on the values in x.
@@ -620,10 +630,10 @@ def digitize(x, bins):
     return jnp.digitize(x, bins)
 
 
-def dot(x, y):
-    x = convert_to_tensor(x)
-    y = convert_to_tensor(y)
-    return jnp.dot(x, y)
+def dot(x1, x2):
+    x1 = convert_to_tensor(x1)
+    x2 = convert_to_tensor(x2)
+    return jnp.dot(x1, x2)
 
 
 def empty(shape, dtype=None):
@@ -920,12 +930,10 @@ def not_equal(x1, x2):
     return jnp.not_equal(x1, x2)
 
 
-@sparse.elementwise_unary(linear=False)
 def ones_like(x, dtype=None):
     return jnp.ones_like(x, dtype=dtype)
 
 
-@sparse.elementwise_unary(linear=True)
 def zeros_like(x, dtype=None):
     return jnp.zeros_like(x, dtype=dtype)
 
@@ -974,9 +982,9 @@ def ravel(x):
     return jnp.ravel(x)
 
 
-def unravel_index(x, shape):
-    x = convert_to_tensor(x)
-    return jnp.unravel_index(x, shape)
+def unravel_index(indices, shape):
+    indices = convert_to_tensor(indices)
+    return jnp.unravel_index(indices, shape)
 
 
 @sparse.elementwise_unary(linear=True)
@@ -1204,7 +1212,7 @@ def vectorize(pyfunc, *, excluded=None, signature=None):
     return jnp.vectorize(pyfunc, excluded=excluded, signature=signature)
 
 
-def where(condition, x1, x2):
+def where(condition, x1=None, x2=None):
     return jnp.where(condition, x1, x2)
 
 
@@ -1330,6 +1338,11 @@ def logical_xor(x1, x2):
     return jnp.logical_xor(x1, x2)
 
 
+def corrcoef(x):
+    x = convert_to_tensor(x)
+    return jnp.corrcoef(x)
+
+
 def correlate(x1, x2, mode="valid"):
     x1 = convert_to_tensor(x1)
     x2 = convert_to_tensor(x2)
@@ -1349,5 +1362,5 @@ def argpartition(x, kth, axis=-1):
     return jnp.argpartition(x, kth, axis)
 
 
-def histogram(x, bins, range):
+def histogram(x, bins=10, range=None):
     return jnp.histogram(x, bins=bins, range=range)

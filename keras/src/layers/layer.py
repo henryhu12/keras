@@ -271,7 +271,8 @@ class Layer(BackendLayer, Operation, KerasSaveable):
     ):
         BackendLayer.__init__(self)
         self._lock = False
-        Operation.__init__(self, dtype=dtype, name=name)
+        Operation.__init__(self, name=name)
+        self._dtype_policy = dtype_policies.get(dtype)
         self.activity_regularizer = regularizers.get(activity_regularizer)
         input_dim_arg = kwargs.pop("input_dim", None)
         if input_dim_arg is not None:
@@ -1203,8 +1204,8 @@ class Layer(BackendLayer, Operation, KerasSaveable):
             scope = backend.get_stateless_scope()
             if scope.collect_losses:
                 for x in losses:
-                    scope.add_loss(loss)
-                    self._loss_ids.add(id(loss))
+                    scope.add_loss(x)
+                    self._loss_ids.add(id(x))
         else:
             self._losses.extend(losses)
 
@@ -1417,8 +1418,11 @@ class Layer(BackendLayer, Operation, KerasSaveable):
     def add_metric(self, *args, **kwargs):
         # Permanently disabled
         raise NotImplementedError(
-            "Layer `add_metric()` method is deprecated"
-            " add your metric in `Model.compile(metrics=[...]).`"
+            "Layer `add_metric()` method is deprecated. "
+            "Add your metric in `Model.compile(metrics=[...])`, "
+            "or create metric trackers in init() or build() "
+            "when subclassing the layer or model, then call "
+            "`metric.update_state()` whenever necessary."
         )
 
     def count_params(self):

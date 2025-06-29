@@ -14,6 +14,7 @@ from keras.src import models
 from keras.src import ops
 from keras.src import optimizers
 from keras.src import testing
+from keras.src.backend import config
 from keras.src.backend.common.symbolic_scope import in_symbolic_scope
 from keras.src.callbacks.callback import Callback
 from keras.src.optimizers.rmsprop import RMSprop
@@ -283,14 +284,13 @@ class StepObserver(Callback):
 
 
 class StepCount(Callback):
-    def __init__(self, batches_indices, batch_size):
+    def __init__(self, steps_per_execution=1):
         super().__init__()
         self.begin_count = 0
         self.end_count = 0
         self.epoch_begin_count = 0
         self.epoch_end_count = 0
-        self.batches = batches_indices
-        self.batch_size = batch_size
+        self.steps_per_execution = steps_per_execution
 
     def on_epoch_begin(self, epoch, logs=None):
         self.begin_count = 0
@@ -301,13 +301,12 @@ class StepCount(Callback):
         self.epoch_end_count += 1
 
     def on_batch_begin(self, batch, logs=None):
-        if self.begin_count < len(self.batches):
-            assert batch == self.batches[self.begin_count] // self.batch_size
+        assert batch == self.begin_count * self.steps_per_execution
         self.begin_count += 1
 
     def on_batch_end(self, batch, logs=None):
-        assert batch == self.batches[self.end_count] // self.batch_size
         self.end_count += 1
+        assert batch == self.end_count * self.steps_per_execution - 1
 
 
 class TestTrainer(testing.TestCase):
@@ -975,10 +974,6 @@ class TestTrainer(testing.TestCase):
         batch_size = 16
         epochs = 2
 
-        batches_indices = list(
-            range(0, data_size, steps_per_execution * batch_size)
-        )
-
         x = np.ones((data_size, 4))
         y = np.ones((data_size, 1))
 
@@ -990,7 +985,7 @@ class TestTrainer(testing.TestCase):
             run_eagerly=(mode == "eager"),
             jit_compile=(mode == "jit"),
         )
-        step_count = StepCount(batches_indices, batch_size)
+        step_count = StepCount(steps_per_execution)
 
         history = model.fit(
             x=x,
@@ -1001,7 +996,10 @@ class TestTrainer(testing.TestCase):
             verbose=0,
         )
 
-        self.assertEqual(step_count.begin_count, len(batches_indices))
+        self.assertEqual(
+            step_count.begin_count,
+            1 + (data_size - 1) // (steps_per_execution * batch_size),
+        )
         self.assertEqual(step_count.end_count, step_count.begin_count)
         self.assertEqual(step_count.epoch_begin_count, epochs)
         self.assertEqual(
@@ -1045,10 +1043,6 @@ class TestTrainer(testing.TestCase):
         epochs = 2
         unrolled_steps_per_execution = 8
 
-        batches_indices = list(
-            range(0, data_size, steps_per_execution * batch_size)
-        )
-
         x = np.ones((data_size, 4))
         y = np.ones((data_size, 1))
 
@@ -1059,7 +1053,7 @@ class TestTrainer(testing.TestCase):
             steps_per_execution=steps_per_execution,
             jit_compile=True,
         )
-        step_count = StepCount(batches_indices, batch_size)
+        step_count = StepCount(steps_per_execution)
         model.unrolled_steps_per_execution = unrolled_steps_per_execution
         history = model.fit(
             x=x,
@@ -1070,7 +1064,10 @@ class TestTrainer(testing.TestCase):
             verbose=0,
         )
 
-        self.assertEqual(step_count.begin_count, len(batches_indices))
+        self.assertEqual(
+            step_count.begin_count,
+            1 + (data_size - 1) // (steps_per_execution * batch_size),
+        )
         self.assertEqual(step_count.end_count, step_count.begin_count)
         self.assertEqual(step_count.epoch_begin_count, epochs)
         self.assertEqual(
@@ -1208,10 +1205,6 @@ class TestTrainer(testing.TestCase):
         batch_size = 16
         epochs = 2
 
-        batches_indices = list(
-            range(0, data_size, steps_per_execution * batch_size)
-        )
-
         def data_generator():
             x = np.ones((data_size, 4), dtype=np.float32)
             y = np.ones((data_size, 1), dtype=np.float32)
@@ -1237,7 +1230,7 @@ class TestTrainer(testing.TestCase):
             run_eagerly=(mode == "eager"),
             jit_compile=(mode == "jit"),
         )
-        step_count = StepCount(batches_indices, batch_size)
+        step_count = StepCount(steps_per_execution)
 
         history = model.fit(
             dataset,
@@ -1246,8 +1239,9 @@ class TestTrainer(testing.TestCase):
             verbose=0,
         )
 
-        self.assertGreaterEqual(step_count.begin_count, len(batches_indices))
-        self.assertEqual(step_count.end_count, len(batches_indices))
+        batch_count = 1 + (data_size - 1) // (steps_per_execution * batch_size)
+        self.assertGreaterEqual(step_count.begin_count, batch_count)
+        self.assertEqual(step_count.end_count, batch_count)
         self.assertEqual(step_count.epoch_begin_count, epochs)
         self.assertEqual(
             step_count.epoch_end_count, step_count.epoch_begin_count
@@ -1505,6 +1499,48 @@ class TestTrainer(testing.TestCase):
                 model_2.predict(x, batch_size=batch_size),
             )
             self.assertAllClose(model.evaluate(x, y), model_2.evaluate(x, y))
+
+    @pytest.mark.requires_trainable_backend
+    def test_max_epochs_and_steps(self):
+        batch_size = 8
+        epochs = 4
+        num_batches = 10
+        data_size = num_batches * batch_size
+        x, y = np.ones((data_size, 4)), np.ones((data_size, 1))
+        model = ExampleModel(units=1)
+        model.compile(
+            loss="mse",
+            optimizer="sgd",
+            metrics=[EpochAgnosticMeanSquaredError()],
+        )
+        step_observer = StepObserver()
+        model.fit(
+            x=x,
+            y=y,
+            batch_size=batch_size,
+            epochs=epochs,
+            callbacks=[step_observer],
+            verbose=0,
+        )
+        self.assertEqual(step_observer.epoch_begin_count, epochs)
+        self.assertEqual(step_observer.begin_count, num_batches * epochs)
+        try:
+            config.set_max_epochs(2)
+            config.set_max_steps_per_epoch(3)
+            step_observer = StepObserver()
+            model.fit(
+                x=x,
+                y=y,
+                batch_size=batch_size,
+                epochs=epochs,
+                callbacks=[step_observer],
+                verbose=0,
+            )
+            self.assertEqual(step_observer.epoch_begin_count, 2)
+            self.assertEqual(step_observer.begin_count, 6)
+        finally:
+            config.set_max_epochs(None)
+            config.set_max_steps_per_epoch(None)
 
     @parameterized.named_parameters(
         named_product(

@@ -44,6 +44,7 @@ from keras.src.ops.numpy import concatenate as concatenate
 from keras.src.ops.numpy import conj as conj
 from keras.src.ops.numpy import conjugate as conjugate
 from keras.src.ops.numpy import copy as copy
+from keras.src.ops.numpy import corrcoef as corrcoef
 from keras.src.ops.numpy import correlate as correlate
 from keras.src.ops.numpy import cos as cos
 from keras.src.ops.numpy import cosh as cosh
@@ -76,6 +77,7 @@ from keras.src.ops.numpy import get_item as get_item
 from keras.src.ops.numpy import greater as greater
 from keras.src.ops.numpy import greater_equal as greater_equal
 from keras.src.ops.numpy import hamming as hamming
+from keras.src.ops.numpy import hanning as hanning
 from keras.src.ops.numpy import histogram as histogram
 from keras.src.ops.numpy import hstack as hstack
 from keras.src.ops.numpy import identity as identity
@@ -85,6 +87,7 @@ from keras.src.ops.numpy import isclose as isclose
 from keras.src.ops.numpy import isfinite as isfinite
 from keras.src.ops.numpy import isinf as isinf
 from keras.src.ops.numpy import isnan as isnan
+from keras.src.ops.numpy import kaiser as kaiser
 from keras.src.ops.numpy import left_shift as left_shift
 from keras.src.ops.numpy import less as less
 from keras.src.ops.numpy import less_equal as less_equal
@@ -131,6 +134,7 @@ from keras.src.ops.numpy import right_shift as right_shift
 from keras.src.ops.numpy import roll as roll
 from keras.src.ops.numpy import rot90 as rot90
 from keras.src.ops.numpy import round as round
+from keras.src.ops.numpy import searchsorted as searchsorted
 from keras.src.ops.numpy import select as select
 from keras.src.ops.numpy import sign as sign
 from keras.src.ops.numpy import signbit as signbit
