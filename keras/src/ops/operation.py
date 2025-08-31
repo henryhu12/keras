@@ -1,4 +1,5 @@
 import inspect
+import os.path
 import textwrap
 
 from keras.src import backend
@@ -6,21 +7,23 @@ from keras.src import dtype_policies
 from keras.src import tree
 from keras.src.api_export import keras_export
 from keras.src.backend.common.keras_tensor import any_symbolic_tensors
+from keras.src.backend.config import is_nnx_enabled
 from keras.src.ops.node import Node
+from keras.src.saving.keras_saveable import KerasSaveable
 from keras.src.utils import python_utils
 from keras.src.utils import traceback_utils
 from keras.src.utils.naming import auto_name
 
 
 @keras_export("keras.Operation")
-class Operation:
+class Operation(KerasSaveable):
     def __init__(self, name=None):
         if name is None:
             name = auto_name(self.__class__.__name__)
-        if not isinstance(name, str) or "/" in name:
+        if not isinstance(name, str) or os.path.sep in name:
             raise ValueError(
                 "Argument `name` must be a string and "
-                "cannot contain character `/`. "
+                f"cannot contain character `{os.path.sep}`. "
                 f"Received: name={name} (of type {type(name)})"
             )
         self.name = name
@@ -118,6 +121,13 @@ class Operation:
         to manually implement `get_config()`.
         """
         instance = super(Operation, cls).__new__(cls)
+        if backend.backend() == "jax" and is_nnx_enabled():
+            from flax import nnx
+
+            try:
+                vars(instance)["_pytree__state"] = nnx.pytreelib.PytreeState()
+            except AttributeError:
+                vars(instance)["_object__state"] = nnx.object.ObjectState()
 
         # Generate a config to be returned by default by `get_config()`.
         arg_names = inspect.getfullargspec(cls.__init__).args
@@ -201,10 +211,9 @@ class Operation:
 
             def get_config(self):
                 config = super().get_config()
-                config.update({{
-                    "arg1": self.arg1,
+                config.update({"arg1": self.arg1,
                     "arg2": self.arg2,
-                }})
+                })
                 return config"""
                 )
             )
@@ -310,6 +319,9 @@ class Operation:
             return values[0]
         else:
             return values
+
+    def _obj_type(self):
+        return "Operation"
 
     # Hooks for backend layer classes
     def _post_build(self):
