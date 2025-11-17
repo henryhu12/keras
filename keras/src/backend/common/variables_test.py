@@ -328,6 +328,10 @@ class VariablePropertiesTest(test_case.TestCase):
         v = backend.Variable(initializer=np.ones((2, 2)), name="test_var")
         self.assertEqual(v.path, "test_var")
 
+        with backend.name_scope("test_scope"):
+            v = backend.Variable(initializer=np.ones((2, 2)), name="test_var")
+            self.assertEqual(v.path, "test_scope/test_var")
+
     def test_overwrite_with_gradient_setter(self):
         v = backend.Variable(
             initializer=initializers.RandomNormal(),
@@ -807,6 +811,14 @@ class VariableOpsDTypeTest(test_case.TestCase):
             x for x in ALL_DTYPES if x not in ("uint16", "uint32", "complex64")
         ]
         INT_DTYPES = [x for x in INT_DTYPES if x not in ("uint16", "uint32")]
+    elif backend.backend() == "tensorflow":
+        # TODO(hongyu): Re-enable uint32 tests once we determine how to handle
+        # dtypes.result_type(uint32, int*) -> int64 promotion.
+        # Since TF variables require int64 to be placed on the GPU, we
+        # exclusively enable the int64 dtype for TF. However, JAX does not
+        # natively support int64, which prevents us from comparing the dtypes.
+        ALL_DTYPES = [x for x in ALL_DTYPES if x not in ("uint32",)]
+        INT_DTYPES = [x for x in INT_DTYPES if x not in ("uint32",)]
     elif backend.backend() == "openvino":
         ALL_DTYPES = [x for x in ALL_DTYPES if x not in ("complex64",)]
     NON_COMPLEX_DTYPES = [
@@ -957,32 +969,19 @@ class VariableOpsDTypeTest(test_case.TestCase):
         named_product(dtypes=itertools.combinations(NON_COMPLEX_DTYPES, 2))
     )
     def test_truediv(self, dtypes):
-        import jax.experimental
         import jax.numpy as jnp
 
-        # We have to disable x64 for jax since jnp.true_divide doesn't respect
-        # JAX_DEFAULT_DTYPE_BITS=32 in `./conftest.py`. We also need to downcast
-        # the expected dtype from 64 bit to 32 bit when using jax backend.
-        with jax.experimental.disable_x64():
-            dtype1, dtype2 = dtypes
-            x1 = backend.Variable(
-                "ones", shape=(1,), dtype=dtype1, trainable=False
-            )
-            x2 = backend.Variable(
-                "ones", shape=(1,), dtype=dtype2, trainable=False
-            )
-            x1_jax = jnp.ones((1,), dtype=dtype1)
-            x2_jax = jnp.ones((1,), dtype=dtype2)
-            expected_dtype = standardize_dtype(
-                jnp.true_divide(x1_jax, x2_jax).dtype
-            )
-            if "float64" in (dtype1, dtype2):
-                expected_dtype = "float64"
-            if backend.backend() == "jax":
-                expected_dtype = expected_dtype.replace("64", "32")
+        dtype1, dtype2 = dtypes
+        x1 = backend.Variable("ones", shape=(1,), dtype=dtype1, trainable=False)
+        x2 = backend.Variable("ones", shape=(1,), dtype=dtype2, trainable=False)
+        x1_jax = jnp.ones((1,), dtype=dtype1)
+        x2_jax = jnp.ones((1,), dtype=dtype2)
+        expected_dtype = standardize_dtype(
+            jnp.true_divide(x1_jax, x2_jax).dtype
+        )
 
-            self.assertDType(x1 / x2, expected_dtype)
-            self.assertDType(x1.__rtruediv__(x2), expected_dtype)
+        self.assertDType(x1 / x2, expected_dtype)
+        self.assertDType(x1.__rtruediv__(x2), expected_dtype)
 
     @parameterized.named_parameters(
         named_product(dtypes=itertools.combinations(NON_COMPLEX_DTYPES, 2))
