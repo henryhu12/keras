@@ -15,10 +15,78 @@ from keras.src import quantizers
 from keras.src import random
 from keras.src import saving
 from keras.src import testing
+from keras.src.quantizers.awq_config import AWQConfig
 from keras.src.quantizers.gptq_config import GPTQConfig
+from keras.src.quantizers.quantization_config import Int4QuantizationConfig
+from keras.src.quantizers.quantization_config import Int8QuantizationConfig
+from keras.src.quantizers.quantizers import AbsMaxQuantizer
 
 
 class EinsumDenseTest(testing.TestCase):
+    @parameterized.named_parameters(
+        ("int8", "int8", {"axis": 0}, {"axis": -1}),
+        (
+            "int4",
+            "int4",
+            {"axis": 0, "value_range": (-8, 7), "output_dtype": "int8"},
+            {"axis": -1},
+        ),
+        ("int8_weight_only", "int8", {"axis": 0}, None),
+        (
+            "int4_weight_only",
+            "int4",
+            {"axis": 0, "value_range": (-8, 7), "output_dtype": "int8"},
+            None,
+        ),
+    )
+    def test_einsum_dense_quantize(
+        self, mode, weight_quantizer_args, activation_quantizer_args
+    ):
+        """Test EinsumDense quantization with QuantizationConfig."""
+        layer = layers.EinsumDense(
+            equation="ab,bcd->acd",
+            output_shape=(8, 32),
+            bias_axes="d",
+        )
+        layer.build((None, 3))
+
+        weight_quantizer = AbsMaxQuantizer(**weight_quantizer_args)
+        if activation_quantizer_args is not None:
+            activation_quantizer = AbsMaxQuantizer(**activation_quantizer_args)
+        else:
+            activation_quantizer = None
+
+        if mode == "int8":
+            config = Int8QuantizationConfig(
+                weight_quantizer=weight_quantizer,
+                activation_quantizer=activation_quantizer,
+            )
+        elif mode == "int4":
+            config = Int4QuantizationConfig(
+                weight_quantizer=weight_quantizer,
+                activation_quantizer=activation_quantizer,
+            )
+
+        layer.quantize(mode, config=config)
+
+        if activation_quantizer_args is not None:
+            # Verify inputs_quantizer is set correctly
+            self.assertIsInstance(layer.inputs_quantizer, AbsMaxQuantizer)
+        else:
+            # Verify inputs_quantizer is None
+            self.assertIsNone(layer.inputs_quantizer)
+
+        # Verify call works
+        x = np.random.random((2, 3)).astype("float32")
+        y = layer(x)
+        self.assertEqual(y.shape, (2, 8, 32))
+
+        if mode == "int4":
+            # Verify kernel is int8 (packed int4)
+            self.assertEqual(
+                backend.standardize_dtype(layer._kernel.dtype), "int8"
+            )
+
     @parameterized.named_parameters(
         {
             "testcase_name": "_1d_end_weight",
@@ -404,7 +472,9 @@ class EinsumDenseTest(testing.TestCase):
 
         # Verify that the effective kernel property returns the expected value.
         actual_kernel = ops.convert_to_numpy(layer.kernel)
-        self.assertAllClose(actual_kernel, expected_kernel)
+        self.assertAllClose(
+            actual_kernel, expected_kernel, tpu_atol=1e-3, tpu_rtol=1e-3
+        )
 
     @pytest.mark.requires_trainable_backend
     def test_lora_rank_argument(self):
@@ -1027,6 +1097,27 @@ class EinsumDenseTest(testing.TestCase):
         new_layer.build((None, 3))
         self.assertEqual(new_layer.quantization_mode, "gptq")
 
+    def test_awq_serialization(self):
+        """Test that an AWQ-quantized layer can be serialized and deserialized
+        correctly."""
+        config = dict(
+            equation="ab,bcd->acd",
+            output_shape=(8, 32),
+            bias_axes="d",
+        )
+        layer = layers.EinsumDense(**config)
+        layer.build((None, 3))
+        layer.quantize(
+            "awq",
+            config=AWQConfig(
+                dataset=None, tokenizer=None, group_size=8, num_grid_points=10
+            ),
+        )
+        layer_config = layer.get_config()
+        new_layer = layers.EinsumDense.from_config(layer_config)
+        new_layer.build((None, 3))
+        self.assertEqual(new_layer.quantization_mode, "awq")
+
     def test_int4_kernel_returns_unpacked_form(self):
         """Test that the `kernel` property returns the unpacked int4 kernel."""
         layer = layers.EinsumDense(
@@ -1085,6 +1176,15 @@ class EinsumDenseTest(testing.TestCase):
             # g_idx
             "4": np.random.random((24,)).astype("float32"),
         }
+        # kernel shape (3, 8, 32), packed: (16, 24) for 4-bit
+        awq_store = {
+            "0": np.random.random((32,)).astype("float32"),  # bias
+            "1": np.random.randint(0, 16, size=(16, 24), dtype="uint8"),
+            "2": np.random.random((32, 3)).astype("float32"),  # scale
+            "3": np.random.random((32, 3)).astype("uint8"),  # zero
+            "4": np.random.random((24,)).astype("float32"),  # awq_scales
+            "5": np.random.random((24,)).astype("float32"),  # g_idx
+        }
         config = dict(
             equation="ab,bcd->acd",
             output_shape=(8, 32),
@@ -1138,6 +1238,18 @@ class EinsumDenseTest(testing.TestCase):
         self.assertAllClose(layer.kernel_zero, gptq_store["3"])
         self.assertAllClose(layer.g_idx, gptq_store["4"])
 
+        # Test awq-quantized layer.
+        layer = layers.EinsumDense(**config, dtype="awq/4/8_from_float32")
+        layer.build((None, 3))
+        layer.load_own_variables(awq_store)
+        self.assertTrue(layer.is_awq_calibrated)
+        self.assertAllClose(layer.bias, awq_store["0"])
+        self.assertAllClose(layer.quantized_kernel, awq_store["1"])
+        self.assertAllClose(layer.kernel_scale, awq_store["2"])
+        self.assertAllClose(layer.kernel_zero, awq_store["3"])
+        self.assertAllClose(layer.awq_scales, awq_store["4"])
+        self.assertAllClose(layer.g_idx, awq_store["5"])
+
     def test_int4_gptq_kernel_returns_unpacked_form(self):
         """Test that the `kernel` property returns the unpacked int4 GPTQ
         kernel."""
@@ -1182,3 +1294,79 @@ class EinsumDenseTest(testing.TestCase):
             quantized_kernel_params,
             original_kernel_params // 2,
         )
+
+    def test_int4_awq_kernel_returns_unpacked_form(self):
+        """Test that the `kernel` property returns the unpacked int4 AWQ
+        kernel."""
+        layer = layers.EinsumDense(
+            equation="ab,bc->ac",
+            output_shape=(2,),
+        )
+        layer.build((None, 2))
+        layer.quantize(
+            "awq",
+            config=AWQConfig(
+                dataset=None, tokenizer=None, group_size=8, num_grid_points=10
+            ),
+        )
+        layer.is_awq_calibrated = True  # Bypass calibration check
+        packed_kernel = layer.quantized_kernel
+        self.assertAllClose(
+            layer.kernel, quantizers.unpack_int4(packed_kernel, 2)
+        )
+
+    def test_awq_kernel_packing(self):
+        """Validates that 4-bit AWQ packing reduces the kernel size."""
+        config = dict(
+            equation="ab,bcd->acd",
+            output_shape=(8, 32),
+            bias_axes="d",
+        )
+        layer = layers.EinsumDense(**config)
+        layer.build((None, 3))
+
+        original_kernel_params = ops.prod(layer._kernel.shape)
+
+        layer.quantize(
+            "awq",
+            config=AWQConfig(
+                dataset=None, tokenizer=None, group_size=8, num_grid_points=10
+            ),
+        )
+
+        quantized_kernel_params = ops.prod(layer.quantized_kernel.shape)
+        self.assertEqual(
+            quantized_kernel_params,
+            original_kernel_params // 2,
+        )
+
+    def test_einsum_dense_int8_custom_quantizer(self):
+        """
+        Test custom quantizer serialization for einsum dense layer with
+        int8 quantization.
+        """
+        # Setup
+        weight_range = (-10, 10)
+        config = Int8QuantizationConfig(
+            weight_quantizer=AbsMaxQuantizer(axis=0, value_range=weight_range),
+            activation_quantizer=None,
+        )
+
+        # Build & Quantize
+        layer = layers.EinsumDense("ab,bc->ac", output_shape=10)
+        layer.build((None, 5))
+        layer.quantize("int8", config=config)
+
+        # Serialize & Deserialize
+        serialized = layer.get_config()
+        new_layer = layers.EinsumDense.from_config(serialized)
+
+        # Verify
+        self.assertIsInstance(
+            new_layer.quantization_config, Int8QuantizationConfig
+        )
+
+        quantizer = new_layer.quantization_config.weight_quantizer
+        self.assertIsInstance(quantizer, AbsMaxQuantizer)
+        self.assertEqual(quantizer.axis, (0,))
+        self.assertAllEqual(quantizer.value_range, weight_range)
