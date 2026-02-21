@@ -1,6 +1,7 @@
 import builtins
 import math
 
+import jax
 import jax.experimental.sparse as jax_sparse
 import jax.numpy as jnp
 from jax import export as jax_export
@@ -14,6 +15,18 @@ from keras.src.backend.jax import nn
 from keras.src.backend.jax import sparse
 from keras.src.backend.jax.core import cast
 from keras.src.backend.jax.core import convert_to_tensor
+
+
+def _uses_cpu(x):
+    if hasattr(x, "device"):
+        device = x.device
+        if not isinstance(device, jax.Device):
+            # Array is sharded.
+            return False
+        return device.platform == "cpu"
+    else:
+        # This is a Tracer, not a concrete Array.
+        return jax.default_backend() == "cpu"
 
 
 def rot90(array, k=1, axes=(0, 1)):
@@ -402,11 +415,9 @@ def arctanh(x):
 
 
 def argmax(x, axis=None, keepdims=False):
-    from keras.src.testing.test_case import uses_cpu
-
     x = convert_to_tensor(x)
     dtype = standardize_dtype(x.dtype)
-    if "float" not in dtype or not uses_cpu() or x.ndim == 0:
+    if "float" not in dtype or x.ndim == 0 or not _uses_cpu(x):
         return jnp.argmax(x, axis=axis, keepdims=keepdims)
 
     # Fix the flush-to-zero (FTZ) issue based on this issue:
@@ -419,11 +430,9 @@ def argmax(x, axis=None, keepdims=False):
 
 
 def argmin(x, axis=None, keepdims=False):
-    from keras.src.testing.test_case import uses_cpu
-
     x = convert_to_tensor(x)
     dtype = standardize_dtype(x.dtype)
-    if "float" not in dtype or not uses_cpu() or x.ndim == 0:
+    if "float" not in dtype or x.ndim == 0 or not _uses_cpu(x):
         return jnp.argmin(x, axis=axis, keepdims=keepdims)
 
     # Fix the flush-to-zero (FTZ) issue based on this issue:
@@ -673,6 +682,10 @@ def dot(x1, x2):
     return jnp.dot(x1, x2)
 
 
+def dstack(xs):
+    return jnp.dstack(xs)
+
+
 def empty(shape, dtype=None):
     dtype = dtype or config.floatx()
     return jnp.empty(shape, dtype=dtype)
@@ -777,6 +790,11 @@ def hstack(xs):
     return jnp.hstack(xs)
 
 
+def hsplit(x, indices_or_sections):
+    x = convert_to_tensor(x)
+    return jnp.hsplit(x, indices_or_sections)
+
+
 def identity(n, dtype=None):
     dtype = dtype or config.floatx()
     return jnp.identity(n, dtype=dtype)
@@ -792,6 +810,12 @@ def isclose(x1, x2, rtol=1e-5, atol=1e-8, equal_nan=False):
     x1 = convert_to_tensor(x1)
     x2 = convert_to_tensor(x2)
     return jnp.isclose(x1, x2, rtol, atol, equal_nan)
+
+
+def allclose(x1, x2, rtol=1e-5, atol=1e-8, equal_nan=False):
+    x1 = convert_to_tensor(x1)
+    x2 = convert_to_tensor(x2)
+    return jnp.allclose(x1, x2, rtol, atol, equal_nan)
 
 
 @sparse.densifying_unary
@@ -1013,9 +1037,34 @@ def moveaxis(x, source, destination):
     return jnp.moveaxis(x, source=source, destination=destination)
 
 
+def nanmax(x, axis=None, keepdims=False):
+    x = convert_to_tensor(x)
+    return jnp.nanmax(x, axis=axis, keepdims=keepdims)
+
+
+def nanmean(x, axis=None, keepdims=False):
+    x = convert_to_tensor(x)
+    return jnp.nanmean(x, axis=axis, keepdims=keepdims)
+
+
+def nanmin(x, axis=None, keepdims=False):
+    x = convert_to_tensor(x)
+    return jnp.nanmin(x, axis=axis, keepdims=keepdims)
+
+
+def nanprod(x, axis=None, keepdims=False):
+    x = convert_to_tensor(x)
+    return jnp.nanprod(x, axis=axis, keepdims=keepdims)
+
+
 def nansum(x, axis=None, keepdims=False):
     x = convert_to_tensor(x)
     return jnp.nansum(x, axis=axis, keepdims=keepdims)
+
+
+def nanvar(x, axis=None, keepdims=False):
+    x = convert_to_tensor(x)
+    return jnp.nanvar(x, axis=axis, keepdims=keepdims)
 
 
 def nan_to_num(x, nan=0.0, posinf=None, neginf=None):
@@ -1319,6 +1368,11 @@ def inner(x1, x2):
 
 def vstack(xs):
     return jnp.vstack(xs)
+
+
+def vsplit(x, indices_or_sections):
+    x = convert_to_tensor(x)
+    return jnp.vsplit(x, indices_or_sections)
 
 
 def vectorize(pyfunc, *, excluded=None, signature=None):

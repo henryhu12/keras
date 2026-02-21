@@ -949,11 +949,9 @@ def argmax(x, axis=None, keepdims=False):
 
 
 def argmin(x, axis=None, keepdims=False):
-    from keras.src.testing.test_case import uses_cpu
-
     x = convert_to_tensor(x)
     dtype = standardize_dtype(x.dtype)
-    if "float" not in dtype or not uses_cpu() or x.ndim == 0:
+    if "float" not in dtype or x.ndim == 0:
         _x = x
         if axis is None:
             x = tf.reshape(x, [-1])
@@ -1480,6 +1478,27 @@ def dot(x1, x2):
     return tf.cast(output, result_dtype)
 
 
+def dstack(xs):
+    xs = [convert_to_tensor(x) for x in xs]
+    if len(xs) > 1:
+        unique_dtypes = {x.dtype for x in xs}
+        if len(unique_dtypes) > 1:
+            dtype = dtypes.result_type(*[x.dtype for x in xs])
+            xs = [cast(x, dtype) for x in xs]
+    xs_reshaped = []
+    for x in xs:
+        shape = x.shape
+        if len(shape) == 0:
+            x = tf.reshape(x, (1, 1, 1))
+        elif len(shape) == 1:
+            x = tf.expand_dims(x, axis=0)
+            x = tf.expand_dims(x, axis=2)
+        elif len(shape) == 2:
+            x = tf.expand_dims(x, axis=2)
+        xs_reshaped.append(x)
+    return tf.concat(xs_reshaped, axis=2)
+
+
 def empty(shape, dtype=None):
     dtype = dtype or config.floatx()
     return tf.zeros(shape, dtype=dtype)
@@ -1642,6 +1661,13 @@ def hstack(xs):
     return tf.concat(xs, axis=1)
 
 
+def hsplit(x, indices_or_sections):
+    x = convert_to_tensor(x)
+    if x.ndim == 1:
+        return split(x, indices_or_sections, axis=0)
+    return split(x, indices_or_sections, axis=1)
+
+
 def hypot(x1, x2):
     x1 = convert_to_tensor(x1)
     x2 = convert_to_tensor(x2)
@@ -1686,6 +1712,24 @@ def isclose(x1, x2, rtol=1e-5, atol=1e-8, equal_nan=False):
         return result
     else:
         return tf.equal(x1, x2)
+
+
+def allclose(x1, x2, rtol=1e-5, atol=1e-8, equal_nan=False):
+    x1 = convert_to_tensor(x1)
+    x2 = convert_to_tensor(x2)
+    dtype = dtypes.result_type(x1.dtype, x2.dtype)
+    x1 = tf.cast(x1, dtype)
+    x2 = tf.cast(x2, dtype)
+
+    if "float" in standardize_dtype(dtype):
+        finite = tf.math.is_finite(x1) & tf.math.is_finite(x2)
+        close = tf.abs(x1 - x2) <= (atol + rtol * tf.abs(x2))
+        result = (finite & close) | tf.equal(x1, x2)
+        if equal_nan:
+            result = result | (is_nan(x1) & is_nan(x2))
+        return tf.reduce_all(result)
+    else:
+        return tf.reduce_all(tf.equal(x1, x2))
 
 
 @sparse.densifying_unary(True)
@@ -2125,6 +2169,77 @@ def moveaxis(x, source, destination):
     return tf.transpose(x, perm)
 
 
+def nanmax(x, axis=None, keepdims=False):
+    x = convert_to_tensor(x)
+
+    if not x.dtype.is_floating:
+        dtype = standardize_dtype(x.dtype)
+        if dtype == "bool":
+            return tf.reduce_any(x, axis=axis, keepdims=keepdims)
+        return tf.reduce_max(x, axis=axis, keepdims=keepdims)
+
+    x_clean = tf.where(
+        tf.math.is_nan(x), tf.constant(float("-inf"), dtype=x.dtype), x
+    )
+
+    return tf.where(
+        tf.reduce_all(tf.math.is_nan(x), axis=axis, keepdims=keepdims),
+        tf.constant(float("nan"), dtype=x.dtype),
+        tf.reduce_max(x_clean, axis=axis, keepdims=keepdims),
+    )
+
+
+def nanmean(x, axis=None, keepdims=False):
+    x = convert_to_tensor(x)
+
+    if axis == () or axis == []:
+        return x
+
+    if not x.dtype.is_floating:
+        return tf.reduce_mean(
+            tf.cast(x, "float32"), axis=axis, keepdims=keepdims
+        )
+
+    dtype = dtypes.result_type(standardize_dtype(x.dtype), float)
+    total_sum = cast(nansum(x, axis=axis, keepdims=keepdims), dtype)
+    normalizer = tf.reduce_sum(
+        cast(~tf.math.is_nan(x), dtype),
+        axis=axis,
+        keepdims=keepdims,
+    )
+    return tf.divide(total_sum, normalizer)
+
+
+def nanmin(x, axis=None, keepdims=False):
+    x = convert_to_tensor(x)
+
+    if not x.dtype.is_floating:
+        dtype = standardize_dtype(x.dtype)
+        if dtype == "bool":
+            return tf.reduce_all(x, axis=axis, keepdims=keepdims)
+        return tf.reduce_min(x, axis=axis, keepdims=keepdims)
+
+    x_clean = tf.where(
+        tf.math.is_nan(x), tf.constant(float("inf"), dtype=x.dtype), x
+    )
+
+    return tf.where(
+        tf.reduce_all(tf.math.is_nan(x), axis=axis, keepdims=keepdims),
+        tf.constant(float("nan"), dtype=x.dtype),
+        tf.reduce_min(x_clean, axis=axis, keepdims=keepdims),
+    )
+
+
+def nanprod(x, axis=None, keepdims=False):
+    x = convert_to_tensor(x)
+
+    if not x.dtype.is_floating:
+        return prod(x, axis=axis, keepdims=keepdims)
+
+    x_safe = tf.where(tf.math.is_nan(x), tf.ones((), dtype=x.dtype), x)
+    return prod(x_safe, axis=axis, keepdims=keepdims)
+
+
 def nansum(x, axis=None, keepdims=False):
     x = convert_to_tensor(x)
     dtype = standardize_dtype(x.dtype)
@@ -2139,6 +2254,31 @@ def nansum(x, axis=None, keepdims=False):
     x_clean = cast(x_clean, dtype)
 
     return tf.reduce_sum(x_clean, axis=axis, keepdims=keepdims)
+
+
+def nanvar(x, axis=None, keepdims=False):
+    x = convert_to_tensor(x)
+    result_dtype = dtypes.result_type(x.dtype, float)
+    x = tf.cast(x, result_dtype)
+
+    mean = nanmean(x, axis=axis, keepdims=True)
+
+    valid = ~tf.math.is_nan(x)
+
+    centered = tf.where(valid, x - mean, tf.zeros_like(x))
+
+    if centered.dtype.is_complex:
+        centered = tf.math.real(centered * tf.math.conj(centered))
+    else:
+        centered = tf.square(centered)
+
+    count = tf.reduce_sum(
+        tf.cast(valid, centered.dtype), axis=axis, keepdims=keepdims
+    )
+
+    var = tf.reduce_sum(centered, axis=axis, keepdims=keepdims) / count
+
+    return var
 
 
 def nan_to_num(x, nan=0.0, posinf=None, neginf=None):
@@ -2938,6 +3078,10 @@ def vstack(xs):
         dtype = dtypes.result_type(*dtype_set)
         xs = tree.map_structure(lambda x: convert_to_tensor(x, dtype), xs)
     return tf.concat(xs, axis=0)
+
+
+def vsplit(x, indices_or_sections):
+    return split(x, indices_or_sections, axis=0)
 
 
 def _vmap_fn(fn, in_axes=0):

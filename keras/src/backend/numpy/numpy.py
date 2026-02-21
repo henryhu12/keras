@@ -138,6 +138,10 @@ def all(x, axis=None, keepdims=False):
     return np.all(x, axis=axis, keepdims=keepdims)
 
 
+def allclose(x1, x2, rtol=1e-05, atol=1e-08, equal_nan=False):
+    return np.allclose(x1, x2, rtol=rtol, atol=atol, equal_nan=equal_nan)
+
+
 def angle(x):
     x = convert_to_tensor(x)
     if standardize_dtype(x.dtype) == "int64":
@@ -607,6 +611,16 @@ def dot(x1, x2):
     return np.dot(x1, x2)
 
 
+def dstack(xs):
+    dtype_set = set([getattr(x, "dtype", type(x)) for x in xs])
+    if len(dtype_set) > 1:
+        dtype = dtypes.result_type(*dtype_set)
+        xs = tree.map_structure(
+            lambda x: convert_to_tensor(x).astype(dtype), xs
+        )
+    return np.dstack(xs)
+
+
 def empty(shape, dtype=None):
     dtype = dtype or config.floatx()
     return np.empty(shape, dtype=dtype)
@@ -698,6 +712,11 @@ def hstack(xs):
             lambda x: convert_to_tensor(x).astype(dtype), xs
         )
     return np.hstack(xs)
+
+
+def hsplit(x, indices_or_sections):
+    x = convert_to_tensor(x)
+    return np.hsplit(x, indices_or_sections)
 
 
 def hypot(x1, x2):
@@ -960,6 +979,32 @@ def moveaxis(x, source, destination):
     return np.moveaxis(x, source=source, destination=destination)
 
 
+def nanmax(x, axis=None, keepdims=False):
+    return np.nanmax(x, axis=axis, keepdims=keepdims)
+
+
+def nanmean(x, axis=None, keepdims=False):
+    dtype = dtypes.result_type(standardize_dtype(x.dtype), float)
+    return np.nanmean(x, axis=axis, keepdims=keepdims).astype(dtype)
+
+
+def nanmin(x, axis=None, keepdims=False):
+    return np.nanmin(x, axis=axis, keepdims=keepdims)
+
+
+def nanprod(x, axis=None, keepdims=False):
+    axis = standardize_axis_for_numpy(axis)
+
+    x = convert_to_tensor(x)
+
+    dtype = dtypes.result_type(x.dtype)
+    if dtype in ("bool", "int8", "int16"):
+        dtype = "int32"
+    elif dtype in ("uint8", "uint16"):
+        dtype = "uint32"
+    return np.nanprod(x, axis=axis, keepdims=keepdims, dtype=dtype)
+
+
 def nansum(x, axis=None, keepdims=False):
     axis = standardize_axis_for_numpy(axis)
     dtype = standardize_dtype(x.dtype)
@@ -969,6 +1014,16 @@ def nansum(x, axis=None, keepdims=False):
     elif dtype in ("uint8", "uint16"):
         dtype = "uint32"
     return np.nansum(x, axis=axis, keepdims=keepdims).astype(dtype)
+
+
+def nanvar(x, axis=None, keepdims=False):
+    axis = standardize_axis_for_numpy(axis)
+    x = convert_to_tensor(x)
+    compute_dtype = dtypes.result_type(x.dtype, "float32")
+    result_dtype = dtypes.result_type(x.dtype, float)
+    return np.nanvar(
+        x, axis=axis, keepdims=keepdims, dtype=compute_dtype
+    ).astype(result_dtype)
 
 
 def nan_to_num(x, nan=0.0, posinf=None, neginf=None):
@@ -1273,6 +1328,11 @@ def vstack(xs):
             lambda x: convert_to_tensor(x).astype(dtype), xs
         )
     return np.vstack(xs)
+
+
+def vsplit(x, indices_or_sections):
+    x = convert_to_tensor(x)
+    return np.vsplit(x, indices_or_sections)
 
 
 def vectorize(pyfunc, *, excluded=None, signature=None):

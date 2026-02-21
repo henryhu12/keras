@@ -1,4 +1,4 @@
-import openvino.opset14 as ov_opset
+import openvino.opset15 as ov_opset
 from openvino import Type
 
 from keras.src.backend.openvino.core import OpenVINOKerasTensor
@@ -122,7 +122,3 @@ def erfinv(x):
 
 def solve(a, b):
     raise NotImplementedError("`solve` is not supported with openvino backend")
-
-
-def norm(x, ord=None, axis=None, keepdims=False):
-    raise NotImplementedError("`norm` is not supported with openvino backend")

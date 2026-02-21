@@ -1324,16 +1324,9 @@ class NNOpsStaticShapeTest(testing.TestCase):
 
 
 class NNOpsCorrectnessTest(testing.TestCase):
-    @pytest.mark.skipif(backend.backend() != "jax", reason="JAX only")
+    @pytest.mark.skipif(not testing.jax_uses_tpu(), reason="JAX on TPU only")
     def test_dot_product_attention_inside_scan(self):
         import jax
-
-        try:
-            if jax.devices()[0].platform != "tpu":
-                self.skipTest("TPU-specific test")
-        except:
-            self.skipTest("TPU-specific test")
-
         import jax.numpy as jnp
 
         def attention_scan_body(carry, x):
@@ -2492,9 +2485,14 @@ class NNOpsCorrectnessTest(testing.TestCase):
             mask = mask[None, None, ...]
             mask = np.tile(mask, (2, 4, 1, 1))
         if bias is not None:
-            if backend.backend() in ("torch", "openvino"):
+            if backend.backend() == "openvino":
                 self.skipTest(
-                    "torch and openvino do not support `bias` with "
+                    "openvino does not support `bias` with "
+                    "`dot_product_attention`"
+                )
+            if backend.backend() == "torch" and mask is not None:
+                self.skipTest(
+                    "torch does not support `mask` and `bias` with "
                     "`dot_product_attention`"
                 )
             bias = np.arange(math.prod(bias_shape), dtype=float).reshape(
@@ -2510,6 +2508,11 @@ class NNOpsCorrectnessTest(testing.TestCase):
             elif backend.backend() == "torch":
                 import torch
 
+                if bias is not None:
+                    self.skipTest(
+                        "Flash attention doesn't support `bias` in torch "
+                        "backend."
+                    )
                 if mask is not None:
                     self.skipTest(
                         "Flash attention doesn't support `mask=None` in torch "
@@ -2805,9 +2808,6 @@ class NNOpsDtypeTest(testing.TestCase):
     def test_squareplus(self, dtype):
         import jax.nn as jnn
         import jax.numpy as jnp
-
-        if dtype == "bfloat16":
-            self.skipTest("Weirdness with numpy")
 
         x = knp.ones((2), dtype=dtype)
         x_jax = jnp.ones((2), dtype=dtype)
@@ -3498,3 +3498,145 @@ class NNOpsBehaviorTest(testing.TestCase):
             ]
         )
         self.assertAllClose(unfold_result, except_result)
+
+    def test_depth_to_space(self):
+        # Test channels_last (default)
+        # Input: (1, 2, 2, 12) -> Output: (1, 4, 4, 3)
+        x = ops.arange(48, dtype="float32")
+        x = ops.reshape(x, [1, 2, 2, 12])
+        result = knn.depth_to_space(x, block_size=2)
+        self.assertEqual(result.shape, (1, 4, 4, 3))
+
+        # Verify the transformation is correct
+        # The depth channel is rearranged into spatial blocks
+        # For block_size=2, channels are split into 2x2 blocks
+        expected = np.array(
+            [
+                [
+                    [[0, 1, 2], [3, 4, 5], [12, 13, 14], [15, 16, 17]],
+                    [[6, 7, 8], [9, 10, 11], [18, 19, 20], [21, 22, 23]],
+                    [[24, 25, 26], [27, 28, 29], [36, 37, 38], [39, 40, 41]],
+                    [[30, 31, 32], [33, 34, 35], [42, 43, 44], [45, 46, 47]],
+                ]
+            ],
+            dtype="float32",
+        )
+        self.assertAllClose(result, expected)
+
+        # Test channels_first
+        # Input: (1, 12, 2, 2) -> Output: (1, 3, 4, 4)
+        x = ops.arange(48, dtype="float32")
+        x = ops.reshape(x, [1, 12, 2, 2])
+        result = knn.depth_to_space(
+            x, block_size=2, data_format="channels_first"
+        )
+        self.assertEqual(result.shape, (1, 3, 4, 4))
+
+        # Test with different block size
+        x = ops.arange(1 * 2 * 2 * 27, dtype="float32")
+        x = ops.reshape(x, [1, 2, 2, 27])
+        result = knn.depth_to_space(x, block_size=3)
+        self.assertEqual(result.shape, (1, 6, 6, 3))
+
+    def test_space_to_depth(self):
+        # Test channels_last (default)
+        # Input: (1, 4, 4, 3) -> Output: (1, 2, 2, 12)
+        x = ops.arange(48, dtype="float32")
+        x = ops.reshape(x, [1, 4, 4, 3])
+        result = knn.space_to_depth(x, block_size=2)
+        self.assertEqual(result.shape, (1, 2, 2, 12))
+
+        # Verify the transformation is correct
+        expected = np.array(
+            [
+                [
+                    [
+                        [0, 1, 2, 3, 4, 5, 12, 13, 14, 15, 16, 17],
+                        [6, 7, 8, 9, 10, 11, 18, 19, 20, 21, 22, 23],
+                    ],
+                    [
+                        [24, 25, 26, 27, 28, 29, 36, 37, 38, 39, 40, 41],
+                        [30, 31, 32, 33, 34, 35, 42, 43, 44, 45, 46, 47],
+                    ],
+                ]
+            ],
+            dtype="float32",
+        )
+        self.assertAllClose(result, expected)
+
+        # Test channels_first
+        # Input: (1, 3, 4, 4) -> Output: (1, 12, 2, 2)
+        x = ops.arange(48, dtype="float32")
+        x = ops.reshape(x, [1, 3, 4, 4])
+        result = knn.space_to_depth(
+            x, block_size=2, data_format="channels_first"
+        )
+        self.assertEqual(result.shape, (1, 12, 2, 2))
+
+        # Test with different block size
+        x = ops.arange(1 * 6 * 6 * 3, dtype="float32")
+        x = ops.reshape(x, [1, 6, 6, 3])
+        result = knn.space_to_depth(x, block_size=3)
+        self.assertEqual(result.shape, (1, 2, 2, 27))
+
+    def test_depth_to_space_space_to_depth_roundtrip(self):
+        # depth_to_space followed by space_to_depth should be identity
+        x = ops.arange(48, dtype="float32")
+        x = ops.reshape(x, [1, 2, 2, 12])
+        y = knn.depth_to_space(x, block_size=2)
+        z = knn.space_to_depth(y, block_size=2)
+        self.assertAllClose(x, z)
+
+        # space_to_depth followed by depth_to_space should be identity
+        x = ops.arange(48, dtype="float32")
+        x = ops.reshape(x, [1, 4, 4, 3])
+        y = knn.space_to_depth(x, block_size=2)
+        z = knn.depth_to_space(y, block_size=2)
+        self.assertAllClose(x, z)
+
+        # Test with channels_first
+        x = ops.arange(48, dtype="float32")
+        x = ops.reshape(x, [1, 12, 2, 2])
+        y = knn.depth_to_space(x, block_size=2, data_format="channels_first")
+        z = knn.space_to_depth(y, block_size=2, data_format="channels_first")
+        self.assertAllClose(x, z)
+
+    def test_depth_to_space_block_size_validation(self):
+        x = ops.arange(48, dtype="float32")
+        x = ops.reshape(x, [1, 2, 2, 12])
+
+        # block_size must be at least 2
+        with self.assertRaisesRegex(
+            ValueError, "`block_size` must be at least 2"
+        ):
+            knn.depth_to_space(x, block_size=0)
+
+        with self.assertRaisesRegex(
+            ValueError, "`block_size` must be at least 2"
+        ):
+            knn.depth_to_space(x, block_size=1)
+
+        with self.assertRaisesRegex(
+            ValueError, "`block_size` must be at least 2"
+        ):
+            knn.depth_to_space(x, block_size=-1)
+
+    def test_space_to_depth_block_size_validation(self):
+        x = ops.arange(48, dtype="float32")
+        x = ops.reshape(x, [1, 4, 4, 3])
+
+        # block_size must be at least 2
+        with self.assertRaisesRegex(
+            ValueError, "`block_size` must be at least 2"
+        ):
+            knn.space_to_depth(x, block_size=0)
+
+        with self.assertRaisesRegex(
+            ValueError, "`block_size` must be at least 2"
+        ):
+            knn.space_to_depth(x, block_size=1)
+
+        with self.assertRaisesRegex(
+            ValueError, "`block_size` must be at least 2"
+        ):
+            knn.space_to_depth(x, block_size=-1)
