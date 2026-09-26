@@ -1,4 +1,5 @@
 import hashlib
+import inspect
 import os
 import re
 import shutil
@@ -41,29 +42,64 @@ def path_to_string(path):
 
 
 def resolve_path(path):
-    return os.path.realpath(os.path.abspath(path))
+    return os.path.realpath(path)
 
 
-def is_path_in_dir(path, base_dir):
-    return resolve_path(os.path.join(base_dir, path)).startswith(base_dir)
+def resolve_sub_path(base_dir, relative_path):
+    """Verify that a relative path stays within the base directory.
+
+    Args:
+        base_dir: The base directory to check against, must be resolved via
+            `resolve_path`.
+        relative_path: The relative path to check.
+
+    Returns:
+        The resolved path if it is within the base directory, None otherwise.
+    """
+    path = resolve_path(os.path.join(base_dir, relative_path))
+    try:
+        if os.path.commonpath([path, base_dir]) == base_dir:
+            return path
+        return None
+    except ValueError:
+        return None
 
 
-def is_link_in_dir(info, base):
-    tip = resolve_path(os.path.join(base, os.path.dirname(info.name)))
-    return is_path_in_dir(info.linkname, base_dir=tip)
+def is_link_in_dir(info, base_dir):
+    if info.islnk():
+        # Hard links resolve relative to the root. Verify both the link
+        # location and target location.
+        return (
+            resolve_sub_path(base_dir, info.name) is not None
+            and resolve_sub_path(base_dir, info.linkname) is not None
+        )
+
+    # Symlinks resolve relative to the directory of their destination.
+    destination = resolve_sub_path(base_dir, info.name)
+    if destination is None:
+        return False
+    link = resolve_path(
+        os.path.join(os.path.dirname(destination), info.linkname)
+    )
+    try:
+        if os.path.commonpath([link, base_dir]) == base_dir:
+            return True
+        return False
+    except ValueError:
+        return False
 
 
 def filter_safe_zipinfos(members, base_dir):
     base_dir = resolve_path(base_dir)
     for finfo in members:
         valid_path = False
-        if is_path_in_dir(finfo.filename, base_dir):
+        if resolve_sub_path(base_dir, finfo.filename) is not None:
             valid_path = True
             yield finfo
         if not valid_path:
             warnings.warn(
                 "Skipping invalid path during archive extraction: "
-                f"'{finfo.name}'.",
+                f"'{finfo.filename}'.",
                 stacklevel=2,
             )
 
@@ -76,7 +112,7 @@ def filter_safe_tarinfos(members, base_dir):
             if is_link_in_dir(finfo, base_dir):
                 valid_path = True
                 yield finfo
-        elif is_path_in_dir(finfo.name, base_dir):
+        elif resolve_sub_path(base_dir, finfo.name) is not None:
             valid_path = True
             yield finfo
         if not valid_path:
@@ -104,10 +140,15 @@ def extract_open_archive(archive, path="."):
     else:
         # Tar archive.
         extractall_kwargs = {}
-        # The `filter="data"` option was added in Python 3.12. It became the
-        # default starting from Python 3.14. So we only specify it between
-        # those two versions.
-        if sys.version_info >= (3, 12) and sys.version_info < (3, 14):
+        # The `filter="data"` option was:
+        # - added in Python 3.12
+        # - backported to Python 3.10.12 and 3.11.4
+        # - became the default starting from Python 3.14
+        # So we only specify it for supported versions before 3.14.
+        if (
+            sys.version_info < (3, 14)
+            and "filter" in inspect.signature(archive.extractall).parameters
+        ):
             extractall_kwargs = {"filter": "data"}
         archive.extractall(
             path,
@@ -273,14 +314,21 @@ def get_file(
 
     if not fname:
         fname = os.path.basename(urllib.parse.urlsplit(origin).path)
-        if not fname:
+        # `basename` strips separators, but a URL path ending in `/.` or `/..`
+        # (or, on Windows, in a drive letter) still yields a name that escapes
+        # `datadir` when joined to it.
+        if (
+            not fname
+            or fname in (os.curdir, os.pardir)
+            or os.path.splitdrive(fname)[0]
+        ):
             raise ValueError(
                 "Can't parse the file name from the origin provided: "
-                f"'{origin}'."
+                f"'{origin}'. "
                 "Please specify the `fname` argument."
             )
     else:
-        if os.sep in fname:
+        if os.sep in fname or (os.altsep and os.altsep in fname):
             raise ValueError(
                 "Paths are no longer accepted as the `fname` argument. "
                 "To specify the file's parent directory, use "

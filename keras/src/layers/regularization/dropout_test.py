@@ -1,5 +1,4 @@
 import numpy as np
-import pytest
 
 from keras.src import backend
 from keras.src import layers
@@ -7,7 +6,6 @@ from keras.src import testing
 
 
 class DropoutTest(testing.TestCase):
-    @pytest.mark.requires_trainable_backend
     def test_dropout_basics(self):
         self.run_layer_test(
             layers.Dropout,
@@ -29,7 +27,7 @@ class DropoutTest(testing.TestCase):
         inputs = np.ones((20, 500))
         layer = layers.Dropout(0.5, seed=1337)
         outputs = layer(inputs, training=True)
-        outputs = backend.convert_to_numpy(outputs)
+        outputs = backend.ops.convert_to_numpy(outputs)
         self.assertAllClose(np.mean(outputs), 1.0, atol=0.02)
         self.assertAllClose(np.max(outputs), 2.0)
 

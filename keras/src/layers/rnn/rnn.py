@@ -209,7 +209,7 @@ class RNN(Layer):
         self.stateful = stateful
         self.unroll = unroll
 
-        self.supports_masking = True
+        self.supports_masking = False
         self.input_spec = None
         self.states = None
         self._expected_batch_size = None
@@ -410,7 +410,7 @@ class RNN(Layer):
         # Note that states may be deeply nested
         # (e.g. in the stacked cells case).
         initial_state = tree.map_structure(
-            lambda x: backend.convert_to_tensor(
+            lambda x: backend.ops.convert_to_tensor(
                 x, dtype=self.cell.compute_dtype
             ),
             initial_state,

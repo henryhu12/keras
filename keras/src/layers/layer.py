@@ -19,7 +19,6 @@ And some more magic:
 import collections
 import functools
 import inspect
-import math
 import warnings
 from functools import wraps
 
@@ -46,6 +45,7 @@ from keras.src.layers import input_spec
 from keras.src.metrics.metric import Metric
 from keras.src.ops.node import Node
 from keras.src.ops.operation import Operation
+from keras.src.quantizers import strategy_registry
 from keras.src.quantizers.quantization_config import validate_and_resolve_config
 from keras.src.utils import python_utils
 from keras.src.utils import summary_utils
@@ -252,11 +252,12 @@ class Layer(BackendLayer, Operation):
             obj._check_quantize_args(mode, obj.compute_dtype)
             obj._tracker.unlock()
             try:
-                original_quantize_method(mode=mode, config=config, **kwargs)
-            except Exception:
-                raise
+                result = original_quantize_method(
+                    mode=mode, config=config, **kwargs
+                )
             finally:
                 obj._tracker.lock()
+            return result
 
         obj.quantize = quantize_wrapper
 
@@ -304,6 +305,12 @@ class Layer(BackendLayer, Operation):
         self._called = False
         self.supports_jit = True
 
+        if not isinstance(trainable, bool):
+            raise ValueError(
+                "Expected `trainable` to be a boolean. "
+                f"Received: trainable={trainable} (of type "
+                f"{type(trainable)})"
+            )
         self._trainable = trainable
         self._losses = []
         self._loss_ids = set()
@@ -336,7 +343,6 @@ class Layer(BackendLayer, Operation):
         self._build_shapes_dict = None
         # Parent path
         self._parent_path = None
-        self._remat_mode = get_current_remat_mode()
         self._initialize_tracker()
 
     @tracking.no_automatic_dependency_tracking
@@ -356,14 +362,16 @@ class Layer(BackendLayer, Operation):
                     trainable_variables,
                 ),
                 "non_trainable_variables": (
-                    lambda x: isinstance(x, backend.Variable)
-                    and not x.trainable,
+                    lambda x: (
+                        isinstance(x, backend.Variable) and not x.trainable
+                    ),
                     non_trainable_variables,
                 ),
                 "metrics": (lambda x: isinstance(x, Metric), metrics),
                 "layers": (
-                    lambda x: isinstance(x, Layer)
-                    and not isinstance(x, Metric),
+                    lambda x: (
+                        isinstance(x, Layer) and not isinstance(x, Metric)
+                    ),
                     layers,
                 ),
                 "seed_generators": (
@@ -517,6 +525,7 @@ class Layer(BackendLayer, Operation):
 
     def add_weight(
         self,
+        *args,
         shape=None,
         initializer=None,
         dtype=None,
@@ -563,6 +572,42 @@ class Layer(BackendLayer, Operation):
             name: String name of the variable. Useful for debugging purposes.
         """
         self._check_super_called()
+        if args:
+            # `args` is only kept to detect the legacy Keras 2 call style
+            # (`add_weight(shape, initializer, dtype, ...)`) and raise a clear
+            # error for positional `name`.
+            if len(args) > 3:
+                raise TypeError(
+                    "add_weight() takes at most 3 positional arguments "
+                    f"but {len(args)} were given."
+                )
+            shape_arg = args[0]
+            if isinstance(shape_arg, str):
+                raise ValueError(
+                    "`name` must be passed as a keyword argument. "
+                    f"Received: add_weight('{shape_arg}', ...). "
+                    f"Use: add_weight(shape=..., name='{shape_arg}')."
+                )
+            if shape is not None:
+                raise ValueError(
+                    "`shape` was passed both positionally and as "
+                    "a keyword argument."
+                )
+            shape = shape_arg
+            if len(args) > 1:
+                if initializer is not None:
+                    raise ValueError(
+                        "`initializer` was passed both positionally and "
+                        "as a keyword argument."
+                    )
+                initializer = args[1]
+            if len(args) > 2:
+                if dtype is not None:
+                    raise ValueError(
+                        "`dtype` was passed both positionally and as a "
+                        "keyword argument."
+                    )
+                dtype = args[2]
         if shape is None:
             shape = ()
         if dtype is not None:
@@ -805,6 +850,27 @@ class Layer(BackendLayer, Operation):
         return policy.quantization_mode
 
     @property
+    def variable_serialization_spec(self):
+        """Maps each supported quantization mode to its variable names.
+
+        A quantizable layer returns a dict from mode name (`None` for the
+        float layer) to the ordered names its `save_own_variables` and
+        `load_own_variables` serialize in that mode. The base implementation
+        returns `None`: the layer has no quantization support.
+
+        Returns:
+            `None`, or a dict such as
+
+            ```python
+            {
+                None: ["kernel", "bias"],
+                "int8": ["kernel", "bias", "kernel_scale"],
+            }
+            ```
+        """
+        return None
+
+    @property
     def input_dtype(self):
         """The dtype layer inputs should be converted to."""
         return self.compute_dtype
@@ -829,7 +895,8 @@ class Layer(BackendLayer, Operation):
     @traceback_utils.filter_traceback
     def __call__(self, *args, **kwargs):
         self._check_super_called()
-        self._called = True
+        if not self._called:
+            self._called = True
 
         original_args = args
         original_kwargs = kwargs
@@ -846,15 +913,24 @@ class Layer(BackendLayer, Operation):
                 backend.set_keras_mask(y, mask)
             return y
 
+        # `kwargs` is usually a dict with just the `training` argument, which
+        # doesn't need conversion.
+        kwargs_may_need_convert = bool(kwargs) and not (
+            len(kwargs) == 1 and "training" in kwargs
+        )
+
         # Used to avoid expensive `tree` operations in the most common case.
         if (
-            kwargs
+            kwargs_may_need_convert
             or len(args) != 1
             or not is_backend_tensor_or_symbolic(args[0], allow_none=False)
             or backend.standardize_dtype(args[0].dtype) != self.input_dtype
         ) and self._convert_input_args:
             args = tree.map_structure(maybe_convert, args)
             kwargs = tree.map_structure(maybe_convert, kwargs)
+        else:
+            # `kwargs` get mutated later, so create a copy.
+            kwargs = dict(kwargs)
 
         ##########################################################
         # 2. Enforce that only tensors can be passed positionally.
@@ -880,8 +956,7 @@ class Layer(BackendLayer, Operation):
 
         ################
         # 4. Call build
-        with self._open_name_scope():
-            self._maybe_build(call_spec)
+        self._maybe_build(call_spec)
 
         ##########################
         # 5. Infer training value
@@ -970,11 +1045,12 @@ class Layer(BackendLayer, Operation):
                             outputs, layout
                         )
 
-                self.built = True
+                if not self.built:
+                    self.built = True
                 # Record activity regularizer loss.
                 if self.activity_regularizer is not None:
                     for output in tree.flatten(outputs):
-                        if backend.is_tensor(output):
+                        if backend.ops.is_tensor(output):
                             loss = self.activity_regularizer(output)
                             if output.ndim > 0:
                                 # Normalize by batch size to ensure consistent
@@ -1025,17 +1101,19 @@ class Layer(BackendLayer, Operation):
         # 1) user explicitly passed it?
         if arg_name in call_spec.user_arguments_dict:
             value = call_spec.user_arguments_dict[arg_name]
+            call_context.set_value(arg_name, value)
         # 2) else: inherited from outer layer call?
         elif call_context.get_value(arg_name) is not None:
             value = call_context.get_value(arg_name)
-        # 3) else: default from the call() signature
+        # 3) else: default from the call() signature. This stays local: the
+        # call context is shared across the whole call tree, so propagating
+        # it would let a non-None default (e.g. a preprocessing layer's
+        # `training=True`) leak to sibling and downstream layers. The bound
+        # `call()` still applies its own default, so there is nothing
+        # further to do here.
         else:
-            value = call_spec.arguments_dict.get(arg_name, None)
+            return
 
-        # stash it for downstream layers
-        call_context.set_value(arg_name, value)
-
-        # only inject it if this layer actually accepts it and it's not None
         if (
             self._call_has_context_arg.get(arg_name, False)
             and value is not None
@@ -1125,26 +1203,43 @@ class Layer(BackendLayer, Operation):
         )
         mapping = list(trainable_mapping) + list(non_trainable_mapping)
 
-        # Call in stateless scope
-        losses = None
-        with backend.StatelessScope(
-            state_mapping=mapping, collect_losses=return_losses
-        ) as scope:
-            if self.dtype_policy.quantization_mode is not None:
-                if self._remat_mode is not None:
+        # Caches info about `call()` signature, args, kwargs.
+        call_spec = CallSpec(
+            self._call_signature, self._call_context_args, args, kwargs
+        )
+
+        # Maintains info about the `Layer.call` stack across nested calls.
+        call_context = self._get_call_context()
+
+        for context_arg in self._call_context_args:
+            self._resolve_and_populate_arg(
+                context_arg, call_spec, call_context, kwargs
+            )
+
+        try:
+            # Call in stateless scope
+            losses = None
+            with backend.StatelessScope(
+                state_mapping=mapping, collect_losses=return_losses
+            ) as scope:
+                if self.dtype_policy.quantization_mode is not None:
+                    if self._remat_mode is not None:
+                        outputs = self.rematerialized_call(
+                            self.quantized_call, *args, **kwargs
+                        )(*args, **kwargs)
+                    else:
+                        outputs = self.quantized_call(*args, **kwargs)
+                elif self._remat_mode is not None:
                     outputs = self.rematerialized_call(
-                        self.quantized_call, *args, **kwargs
+                        self.call, *args, **kwargs
                     )(*args, **kwargs)
                 else:
-                    outputs = self.quantized_call(*args, **kwargs)
-            elif self._remat_mode is not None:
-                outputs = self.rematerialized_call(self.call, *args, **kwargs)(
-                    *args, **kwargs
-                )
-            else:
-                outputs = self.call(*args, **kwargs)
-            if return_losses:
-                losses = self.losses
+                    outputs = self.call(*args, **kwargs)
+                if return_losses:
+                    losses = self.losses
+        finally:
+            # Destroy call context if we created it
+            self._maybe_reset_call_context()
 
         # Gather updated non-trainable variables
         non_trainable_variables = []
@@ -1225,7 +1320,7 @@ class Layer(BackendLayer, Operation):
         # Eager only.
         losses = tree.flatten(loss)
         for x in losses:
-            if not backend.is_tensor(x):
+            if not backend.ops.is_tensor(x):
                 raise ValueError(
                     "`add_loss()` can only be called from inside `build()` or "
                     f"`call()`, on a tensor input. Received invalid value: {x}"
@@ -1281,21 +1376,119 @@ class Layer(BackendLayer, Operation):
         if backend.in_stateless_scope():
             scope = backend.get_stateless_scope()
             if scope.collect_losses:
-                for x in scope.losses:
-                    if id(x) in self._loss_ids:
-                        scope.losses.remove(x)
+                # Filter by identity (id) rather than using list.remove(),
+                # which compares by value. Value comparison on JAX tracers
+                # during JIT causes TracerBoolConversionError.
+                scope.losses[:] = [
+                    x for x in scope.losses if id(x) not in self._loss_ids
+                ]
         self._losses.clear()
         self._loss_ids.clear()
         for layer in self._layers:
             layer._clear_losses()
 
-    # Quantization-related (int8 and float8) methods
+    # Quantization-related methods.
+    #
+    # Mode-specific behavior (variables, forward pass, quantized values,
+    # policy naming) is owned by the strategies in
+    # `keras.src.quantizers.strategy_registry`; the methods below look the
+    # strategy up and delegate. A layer participates by exposing its
+    # quantizable structure through `_quantization_geometry()` and by
+    # listing the modes it supports in its `variable_serialization_spec`.
 
-    def quantized_build(self, input_shape, mode):
-        raise self._not_implemented_error(self.quantized_build)
+    def _supports_quantization_mode(self, strategy):
+        """Whether this layer declares support for `strategy`'s mode.
+
+        A layer declares support by listing the mode name in its
+        `variable_serialization_spec`; an externally registered mode can
+        also claim a layer through its `supports_layer` hook.
+
+        Args:
+            strategy: The `QuantizationStrategy` registered for the mode.
+
+        Returns:
+            A boolean.
+        """
+        spec = self.variable_serialization_spec
+        if spec is not None and strategy.name in spec:
+            return True
+        return strategy.supports_layer(self)
+
+    def _strategy_owns_weight_storage(self):
+        """Whether the quantization strategy creates the weight storage.
+
+        A strategy that owns its weight storage (int8, int4) creates the
+        quantized variables in `quantized_build`, so `build` must not add
+        the floating-point weight. Float8 and the unquantized layer keep
+        the floating-point weight.
+
+        Returns:
+            A boolean.
+        """
+        strategy = strategy_registry.get_strategy(self.quantization_mode)
+        return strategy is not None and strategy.owns_weight_storage
+
+    def quantized_build(self, input_shape, mode, config=None):
+        strategy = strategy_registry.get_strategy(mode)
+        if strategy is None or not self._supports_quantization_mode(strategy):
+            if self.variable_serialization_spec is None:
+                # The layer has no quantization support at all.
+                raise self._not_implemented_error(self.quantized_build)
+            raise self._quantization_mode_error(mode)
+        strategy.build(self, input_shape, config)
+        self._is_quantized = True
 
     def quantize(self, mode=None, type_check=True, config=None):
         raise self._not_implemented_error(self.quantize)
+
+    def _registry_quantize(self, mode, config):
+        """Quantizes this layer through the mode registry.
+
+        The shared `quantize()` body for layers that have moved onto the
+        quantization geometry protocol: validate that the mode is supported
+        by this layer *before* mutating any state, let the mode's strategy
+        compute and swap the variables, then update the dtype policy.
+
+        This is a seam for the migration: each migrated layer's `quantize()`
+        calls it, and once every layer has moved this body becomes
+        `Layer.quantize` itself.
+
+        Args:
+            mode: The quantization mode name, e.g. `"int8"`.
+            config: The resolved `QuantizationConfig`.
+        """
+        strategy = strategy_registry.get_strategy(mode)
+        if strategy is None or not self._supports_quantization_mode(strategy):
+            raise self._quantization_mode_error(mode)
+        # Record the config only after the mode is validated, so a rejected
+        # mode leaves the layer untouched.
+        self.quantization_config = config
+        strategy.quantize(self, config)
+        self._finalize_quantization_policy(strategy, config)
+
+    def _quantization_geometry(self):
+        """Returns this layer's quantization geometry, or `None`.
+
+        The geometry (`keras.src.quantizers.geometry`) describes the layer's
+        quantizable structure; the strategies consume it to build
+        variables, compute quantized values, and run quantized forward
+        passes. The base implementation returns `None`, meaning the layer
+        has no generic quantization support.
+
+        Returns:
+            A `keras.src.quantizers.geometry.QuantizationGeometry` (for
+            example a `ProjectionGeometry` for a 2D kernel), or `None`.
+        """
+        return None
+
+    def _finalize_quantization_policy(self, strategy, config):
+        # Set new dtype policy only for modes that don't already have one.
+        if self.dtype_policy.quantization_mode is None:
+            policy_name = strategy.policy_suffix(self, config)
+            policy = dtype_policies.get(
+                f"{policy_name}_from_{self.dtype_policy.name}"
+            )
+            self.dtype_policy = policy
 
     def _check_quantize_args(self, mode, compute_dtype):
         if not self.built:
@@ -1310,10 +1503,10 @@ class Layer(BackendLayer, Operation):
                 f"dtype_policy='{self.dtype_policy.name}'. "
                 f"Received: mode={mode}"
             )
-        if mode not in dtype_policies.QUANTIZATION_MODES:
+        if not strategy_registry.is_registered(mode):
             raise ValueError(
                 "Invalid quantization mode. "
-                f"Expected one of {dtype_policies.QUANTIZATION_MODES}. "
+                f"Expected one of {strategy_registry.registered_modes()}. "
                 f"Received: mode={mode}"
             )
         if mode == "int8" and compute_dtype == "float16":
@@ -1338,12 +1531,22 @@ class Layer(BackendLayer, Operation):
                 f"Restoring the correct rematerialization mode "
                 f"{self._remat_mode} for this layer."
             )
+        if self._quantization_geometry() is not None:
+            # Layers on the geometry protocol dispatch through the
+            # strategy; the chain below serves the rest.
+            mode = self.quantization_mode
+            strategy = strategy_registry.get_strategy(mode)
+            if strategy is None:
+                raise self._quantization_mode_error(mode)
+            return strategy.call(self, *args, **kwargs)
         if self.quantization_mode == "int8":
             return self._int8_call(*args, **kwargs)
         elif self.quantization_mode == "float8":
             return self._float8_call(*args, **kwargs)
         elif self.quantization_mode == "int4":
             return self._int4_call(*args, **kwargs)
+        elif self.quantization_mode == "ternary":
+            return self._ternary_call(*args, **kwargs)
         elif self.quantization_mode == "gptq":
             return self._gptq_call(*args, **kwargs)
         elif self.quantization_mode == "awq":
@@ -1353,6 +1556,9 @@ class Layer(BackendLayer, Operation):
 
     def _int4_call(self, *args, **kwargs):
         raise self._not_implemented_error(self._int4_call)
+
+    def _ternary_call(self, *args, **kwargs):
+        raise self._not_implemented_error(self._ternary_call)
 
     def _int8_call(self, *args, **kwargs):
         raise self._not_implemented_error(self._int8_call)
@@ -1382,7 +1588,7 @@ class Layer(BackendLayer, Operation):
     def _quantization_mode_error(self, mode):
         return NotImplementedError(
             "Invalid quantization mode. Expected one of "
-            f"{dtype_policies.QUANTIZATION_MODES}. "
+            f"{strategy_registry.registered_modes()}. "
             f"Received: quantization_mode={mode}"
         )
 
@@ -1494,6 +1700,10 @@ class Layer(BackendLayer, Operation):
         if self.built:
             return
 
+        with self._open_name_scope():
+            self._build_from_call_spec(call_spec)
+
+    def _build_from_call_spec(self, call_spec):
         shapes_dict = get_shapes_dict(call_spec)
         first_shape = next(iter(shapes_dict.values()), None)
 
@@ -1583,12 +1793,21 @@ class Layer(BackendLayer, Operation):
                 self._initialize_tracker()
             value = self._tracker.track(value)
 
-        # NNX-specific bypass for `_called` and `built` attributes
-        # bypass nnx.Module.__setattr__ which cannot be called while tracing
+        # NNX-specific bypass for Keras-internal bookkeeping attributes:
+        # some are set during a traced call (e.g. inside the jitted train
+        # step), which nnx.Module.__setattr__ forbids, and
+        # `_compiled_trainable_state` is a dict keyed by layer objects,
+        # which flax's attribute scanning cannot process.
         if (
             backend.backend() == "jax"
             and is_nnx_enabled()
-            and (name == "_called" or name == "built")
+            and name
+            in (
+                "_called",
+                "built",
+                "_losses_override",
+                "_compiled_trainable_state",
+            )
         ):
             object.__setattr__(self, name, value)
             return
@@ -1683,13 +1902,7 @@ class Layer(BackendLayer, Operation):
         flat_masks = tree.flatten(output_masks)
         for tensor, mask in zip(flat_outputs, flat_masks):
             if backend.get_keras_mask(tensor) is None and mask is not None:
-                if backend.backend() == "numpy":
-                    warnings.warn(
-                        "The NumPy backend does not support masking at this"
-                        "time. Masks will be ignored."
-                    )
-                else:
-                    backend.set_keras_mask(tensor, mask)
+                backend.set_keras_mask(tensor, mask)
 
     @python_utils.default
     def get_config(self):
@@ -1727,36 +1940,9 @@ class Layer(BackendLayer, Operation):
         Returns:
             Rematerialized layer's `call` method.
         """
-
-        def compute_size(x):
-            return (
-                math.prod([d or 1 for d in x.shape])
-                if isinstance(x, KerasTensor)
-                else 0
-            )
-
-        # Full rematerialization
-        if self._remat_mode.mode == "full":
-            return remat.remat(layer_call)
-
-        # Apply rematerialization to specific layers
-        elif self._remat_mode.mode == "list_of_layers" and (
-            self.name in self._remat_mode.layer_names
-        ):
-            return remat.remat(layer_call)
-
-        # Apply rematerialization based on output size threshold
-        elif self._remat_mode.mode == "larger_than":
-            output_spec = self.compute_output_spec(*args, **kwargs)
-            output_size = sum(
-                tree.flatten(tree.map_structure(compute_size, output_spec))
-            )
-            if (
-                output_size
-                and output_size > self._remat_mode.output_size_threshold
-            ):
-                return remat.remat(layer_call)
-        elif self._remat_mode.mode == "activations":
+        if not self._remat_mode:
+            return layer_call
+        if self._remat_mode.mode == "activations":
             has_activation = (
                 hasattr(self, "activation") and self.activation is not None
             )
@@ -1772,7 +1958,11 @@ class Layer(BackendLayer, Operation):
                         self.activation = original_activation
 
                 return rematerialized_activation_call_wrapper
-        return layer_call
+        elif self._remat_mode.mode == "list_of_layers" and (
+            self.name in self._remat_mode.layer_names
+        ):
+            return remat.remat(layer_call)
+        return super().rematerialized_call(layer_call, *args, **kwargs)
 
     def _register_call_context_args(self, *names):
         """Registers call-context args for this layer.
@@ -1821,7 +2011,7 @@ class Layer(BackendLayer, Operation):
 
         # Tell the Sequential model to propagate foo_mode down
         # the call-stack
-        seq.register_call_context_args("foo_mode")
+        seq._register_call_context_args("foo_mode")
 
         # foo_mode=True -> input + 1
         out_true = seq(sample_input, foo_mode=True)
@@ -1840,7 +2030,7 @@ class Layer(BackendLayer, Operation):
 def is_backend_tensor_or_symbolic(x, allow_none=False):
     if allow_none and x is None:
         return True
-    return backend.is_tensor(x) or isinstance(x, backend.KerasTensor)
+    return backend.ops.is_tensor(x) or isinstance(x, backend.KerasTensor)
 
 
 class CallSpec:
@@ -1897,7 +2087,8 @@ class CallSpec:
         self.nested_tensor_argument_names = nested_tensor_arg_names
         self.first_arg = arg_dict[arg_names[0]]
         if all(
-            backend.is_tensor(x) for x in self.tensor_arguments_dict.values()
+            backend.ops.is_tensor(x)
+            for x in self.tensor_arguments_dict.values()
         ):
             self.eager = True
         else:

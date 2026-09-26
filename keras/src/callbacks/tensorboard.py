@@ -432,6 +432,9 @@ class TensorBoard(Callback):
 
     def on_train_batch_begin(self, batch, logs=None):
         self._global_train_batch += 1
+        if self.update_freq != "epoch":
+            self._pop_writer()
+            self._push_writer(self._train_writer, self._global_train_batch)
         if self.write_steps_per_second:
             self._batch_start_time = time.time()
         if not self._should_trace:
@@ -475,6 +478,9 @@ class TensorBoard(Callback):
 
     def on_test_batch_begin(self, batch, logs=None):
         self._global_test_batch += 1
+        if self.update_freq != "epoch":
+            self._pop_writer()
+            self._push_writer(self._val_writer, self._global_test_batch)
 
     def on_epoch_begin(self, epoch, logs=None):
         # Keeps track of epoch for profiling.
@@ -510,9 +516,19 @@ class TensorBoard(Callback):
         self._is_tracing = False
 
     def _collect_learning_rate(self, logs):
-        if isinstance(self.model.optimizer, Optimizer):
+        optimizer = self.model.optimizer
+        # Handles the case when the optimizer is wrapped by LossScaleOptimizer
+        if hasattr(optimizer, "inner_optimizer"):
+            optimizer = optimizer.inner_optimizer
+
+        if hasattr(optimizer, "optimizers"):
+            for idx, opt in enumerate(optimizer.optimizers):
+                logs[f"learning_rate_{opt.name}"] = float(
+                    ops.convert_to_numpy(opt.learning_rate)
+                )
+        elif isinstance(optimizer, Optimizer):
             logs["learning_rate"] = float(
-                ops.convert_to_numpy(self.model.optimizer.learning_rate)
+                ops.convert_to_numpy(optimizer.learning_rate)
             )
         return logs
 
@@ -560,7 +576,7 @@ class TensorBoard(Callback):
         with self._train_writer.as_default():
             for layer in self.model.layers:
                 for weight in layer.weights:
-                    weight_name = weight.name.replace(":", "_")
+                    weight_name = weight.path.replace(":", "_")
                     # Add a suffix to prevent summary tag name collision.
                     histogram_weight_name = f"{weight_name}/histogram"
                     self.summary.histogram(
@@ -594,7 +610,7 @@ class TensorBoard(Callback):
                 shape = w_img.shape
             w_img = ops.reshape(w_img, [shape[0], shape[1], shape[2], 1])
 
-        w_img = backend.convert_to_numpy(w_img)
+        w_img = backend.ops.convert_to_numpy(w_img)
         shape = w_img.shape
         # Not possible to handle 3D convnets etc.
         if len(shape) == 4 and shape[-1] in [1, 3, 4]:

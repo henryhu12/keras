@@ -13,6 +13,12 @@ class GeneratorDataAdapter(DataAdapter):
         self.generator = generator
         self._first_batches = first_batches
         self._output_signature = None
+        if not first_batches:
+            raise ValueError(
+                "When passing a Python generator to a Keras model, "
+                "the generator must yield at least one batch. "
+                "Received an empty generator."
+            )
         if not isinstance(first_batches[0], tuple):
             raise ValueError(
                 "When passing a Python generator to a Keras model, "
@@ -25,8 +31,15 @@ class GeneratorDataAdapter(DataAdapter):
     def get_numpy_iterator(self):
         return data_adapter_utils.get_numpy_iterator(self.generator())
 
-    def get_jax_iterator(self):
-        return data_adapter_utils.get_jax_iterator(self.generator())
+    def get_jax_iterator(self, super_batch=None):
+        iterator = data_adapter_utils.get_jax_iterator(self.generator())
+        if super_batch:
+            import jax.numpy as jnp
+
+            iterator = data_adapter_utils.super_batch_iterator(
+                iterator, super_batch, stack_fn=jnp.stack
+            )
+        return iterator
 
     def get_tf_dataset(self):
         from keras.src.utils.module_utils import tensorflow as tf

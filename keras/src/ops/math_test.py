@@ -1,9 +1,11 @@
+import itertools
 import math
 
 import jax.numpy as jnp
 import numpy as np
 import pytest
 import scipy.signal
+import scipy.special
 from absl.testing import parameterized
 
 from keras.src import backend
@@ -12,6 +14,8 @@ from keras.src.backend.common import dtypes
 from keras.src.backend.common import standardize_dtype
 from keras.src.backend.common.keras_tensor import KerasTensor
 from keras.src.ops import math as kmath
+from keras.src.ops import numpy as knp
+from keras.src.testing.test_utils import named_product
 
 
 def _stft(
@@ -128,7 +132,7 @@ def _istft(
     if length is not None:
         end = start + length
     elif center:
-        end = -(fft_length // 2)
+        end = expected_output_len - (fft_length // 2)
     else:
         end = expected_output_len
     return x[..., start:end]
@@ -143,6 +147,46 @@ def _max_reduce(left, right):
 
 
 class MathOpsDynamicShapeTest(testing.TestCase):
+    def test_cdist(self):
+        x = KerasTensor((None, 2, 3))
+        y = KerasTensor((None, 4, 3))
+
+        z = kmath.cdist(x, y)
+        self.assertEqual(z.shape, (None, 2, 4))
+
+    def test_erf(self):
+        x = KerasTensor((None, 2, 3))
+        y = kmath.erf(x)
+        self.assertEqual(y.shape, (None, 2, 3))
+
+    def test_erfc(self):
+        x = KerasTensor((None, 2, 3))
+        y = kmath.erfc(x)
+        self.assertEqual(y.shape, (None, 2, 3))
+
+    def test_erfinv(self):
+        x = KerasTensor((None, 2, 3))
+        y = kmath.erfinv(x)
+        self.assertEqual(y.shape, (None, 2, 3))
+
+    def test_gammainc(self):
+        x1 = KerasTensor((None, 2, 3))
+        x2 = KerasTensor((None, 2, 3))
+
+        z = kmath.gammainc(x1, x2)
+        self.assertEqual(z.shape, (None, 2, 3))
+
+        x1 = KerasTensor((None, 2, 3))
+        x2 = KerasTensor((1, 2, 3))
+
+        z = kmath.gammainc(x1, x2)
+        self.assertEqual(z.shape, (None, 2, 3))
+
+    def test_lgamma(self):
+        x = KerasTensor((None, 2, 3))
+        y = kmath.lgamma(x)
+        self.assertEqual(y.shape, (None, 2, 3))
+
     @parameterized.parameters([(kmath.segment_sum,), (kmath.segment_max,)])
     def test_segment_reduce(self, segment_reduce_op):
         # 1D case
@@ -279,6 +323,52 @@ class MathOpsDynamicShapeTest(testing.TestCase):
         ref_shape = (None,) + ref.shape[1:]
         self.assertEqual(output.shape, ref_shape)
 
+    def test_istft_with_length(self):
+        sequence_length = 4
+        sequence_stride = 1
+        fft_length = 8
+        length = 1
+        window = "hann"
+        center = False
+        real = KerasTensor((None, 10, 5), dtype="float32")
+        imag = KerasTensor((None, 10, 5), dtype="float32")
+
+        output = kmath.istft(
+            (real, imag),
+            sequence_length,
+            sequence_stride,
+            fft_length,
+            length,
+            window,
+            center,
+        )
+
+        ref = _istft(
+            (np.ones((2, 10, 5)), np.ones((2, 10, 5))),
+            sequence_length,
+            sequence_stride,
+            fft_length,
+            length,
+            window,
+            center,
+        )
+        ref_shape = (None,) + ref.shape[1:]
+        self.assertEqual(output.shape, ref_shape)
+
+        real_dyn = KerasTensor((None, None, 5), dtype="float32")
+        imag_dyn = KerasTensor((None, None, 5), dtype="float32")
+
+        output_dyn = kmath.istft(
+            (real_dyn, imag_dyn),
+            sequence_length,
+            sequence_stride,
+            fft_length,
+            length,
+            window,
+            center,
+        )
+        self.assertEqual(output_dyn.shape, (None, 1))
+
     def test_rsqrt(self):
         x = KerasTensor([None, 3])
         self.assertEqual(kmath.rsqrt(x).shape, (None, 3))
@@ -290,6 +380,40 @@ class MathOpsDynamicShapeTest(testing.TestCase):
 
 
 class MathOpsStaticShapeTest(testing.TestCase):
+    def test_cdist(self):
+        x = KerasTensor((1, 2, 3))
+        y = KerasTensor((1, 4, 3))
+
+        z = kmath.cdist(x, y)
+        self.assertEqual(z.shape, (1, 2, 4))
+
+    def test_erf(self):
+        x = KerasTensor((1, 2, 3))
+        y = kmath.erf(x)
+        self.assertEqual(y.shape, (1, 2, 3))
+
+    def test_erfc(self):
+        x = KerasTensor((1, 2, 3))
+        y = kmath.erfc(x)
+        self.assertEqual(y.shape, (1, 2, 3))
+
+    def test_erfinv(self):
+        x = KerasTensor((1, 2, 3))
+        y = kmath.erfinv(x)
+        self.assertEqual(y.shape, (1, 2, 3))
+
+    def test_gammainc(self):
+        x1 = KerasTensor((1, 2, 3))
+        x2 = KerasTensor((1, 2, 3))
+
+        z = kmath.gammainc(x1, x2)
+        self.assertEqual(z.shape, (1, 2, 3))
+
+    def test_lgamma(self):
+        x = KerasTensor((1, 2, 3))
+        y = kmath.lgamma(x)
+        self.assertEqual(y.shape, (1, 2, 3))
+
     @parameterized.parameters([(kmath.segment_sum,), (kmath.segment_max,)])
     @pytest.mark.skipif(
         backend.backend() == "jax",
@@ -433,6 +557,12 @@ class MathOpsStaticShapeTest(testing.TestCase):
         self.assertEqual(out.shape, (2, 4))
 
 
+BACKEND_AGNOSTIC_OPS = [
+    {"testcase_name": "backend_specific", "backend_agnostic_ops": False},
+    {"testcase_name": "backend_agnostic", "backend_agnostic_ops": True},
+]
+
+
 class MathOpsCorrectnessTest(testing.TestCase):
     def run_segment_reduce_test(
         self,
@@ -471,7 +601,7 @@ class MathOpsCorrectnessTest(testing.TestCase):
             num_segments = np.max(segment_ids).item() + 1
         expected_shape = (num_segments,) + data_dims
         if segment_reduce_op == kmath.segment_max:
-            if backend.backend() == "tensorflow":
+            if backend.backend() in ("tensorflow", "openvino"):
                 empty_fill_value = -np.finfo(np.float32).max
             else:
                 empty_fill_value = -np.inf
@@ -606,8 +736,10 @@ class MathOpsCorrectnessTest(testing.TestCase):
         x = np.array([0, 4, 2, 1, 3, -1], dtype=np.float32)
         values, indices = kmath.top_k(x, k=2, sorted=False)
         # Any order ok when `sorted=False`.
-        self.assertEqual(set(backend.convert_to_numpy(values)), set([4, 3]))
-        self.assertEqual(set(backend.convert_to_numpy(indices)), set([1, 4]))
+        self.assertEqual(set(backend.ops.convert_to_numpy(values)), set([4, 3]))
+        self.assertEqual(
+            set(backend.ops.convert_to_numpy(indices)), set([1, 4])
+        )
 
         x = np.random.rand(5, 5)
         outputs = kmath.top_k(x, k=2)
@@ -622,6 +754,38 @@ class MathOpsCorrectnessTest(testing.TestCase):
 
         self.assertAllClose(outputs[0], expected_values)
         self.assertAllClose(outputs[1], expected_indices)
+
+    def check_stability(self, values, indices):
+        """Helper function to check stability of top_k."""
+        values_np = backend.ops.convert_to_numpy(values)
+        indices_np = backend.ops.convert_to_numpy(indices)
+        is_equal = values_np[..., :-1] == values_np[..., 1:]
+        index_increasing = indices_np[..., :-1] < indices_np[..., 1:]
+        self.assertTrue(np.all(np.logical_or(~is_equal, index_increasing)))
+
+    # Below tests are specific to stable top_k implementation.
+    # We have `top_k` operation defined with `is_stable` argument
+    def test_top_k_stability_small(self):
+        x = np.array([3, 5, 5, 2, 5, 1], dtype=np.float32)
+        values, indices = kmath.top_k(x, k=4, is_stable=True)
+        self.assertAllClose(values, [5, 5, 5, 3])
+        self.assertAllClose(indices, [1, 2, 4, 0])
+
+    def test_top_k_stability_large_1d(self):
+        x = np.random.randint(0, 10, size=5000).astype(np.float32)
+        values, indices = kmath.top_k(x, k=2500, is_stable=True)
+        self.check_stability(values, indices)
+
+    def test_top_k_stability_large_2d(self):
+        x = np.random.randint(0, 5, size=(10, 500)).astype(np.int32)
+        values, indices = kmath.top_k(x, k=200, is_stable=True)
+        self.check_stability(values, indices)
+
+    def test_top_k_unstable_large(self):
+        x = np.random.randint(0, 10, size=1000).astype(np.float32)
+        values, indices = kmath.top_k(x, k=500, sorted=True, is_stable=False)
+        self.assertEqual(values.shape, (500,))
+        self.assertEqual(indices.shape, (500,))
 
     def test_in_top_k(self):
         targets = np.array([1, 0, 2])
@@ -661,12 +825,42 @@ class MathOpsCorrectnessTest(testing.TestCase):
             kmath.in_top_k(targets, predictions, k=3), [True, True, True]
         )
 
+        # Test multi-dimensional targets
+        targets = np.array([[1, 0]])
+        predictions = np.array([[[1.0, 0.0], [0.0, 1.0]]], dtype="float32")
+        self.assertAllEqual(
+            kmath.in_top_k(targets, predictions, k=1), [[False, False]]
+        )
+        targets = np.array([[1, 2], [0, 3]])
+        predictions = np.array(
+            [
+                [[0.1, 0.9, 0.8, 0.8], [0.05, 0.95, 0, 1]],
+                [[0.9, 0.1, 0.8, 0.8], [0.1, 0.8, 0.3, 1]],
+            ],
+            dtype="float32",
+        )
+        self.assertAllEqual(
+            kmath.in_top_k(targets, predictions, k=2),
+            [[True, False], [True, True]],
+        )
+
         # Test `nan` in predictions
         # https://github.com/keras-team/keras/issues/19995
         targets = np.array([1, 0])
         predictions = np.array([[0.1, np.nan, 0.5], [0.3, 0.2, 0.5]])
         self.assertAllEqual(
             kmath.in_top_k(targets, predictions, k=2), [False, True]
+        )
+
+        # Test multi-dimensional list (not array/tensor) inputs.
+        targets = [[1, 2], [0, 3]]
+        predictions = [
+            [[0.1, 0.9, 0.8, 0.8], [0.05, 0.95, 0, 1]],
+            [[0.9, 0.1, 0.8, 0.8], [0.1, 0.8, 0.3, 1]],
+        ]
+        self.assertAllEqual(
+            kmath.in_top_k(targets, predictions, k=2),
+            [[True, False], [True, True]],
         )
 
     def test_logsumexp(self):
@@ -717,8 +911,8 @@ class MathOpsCorrectnessTest(testing.TestCase):
         ref = np.fft.fft(complex_arr)
         real_ref = np.real(ref)
         imag_ref = np.imag(ref)
-        self.assertAllClose(real_ref, real_output)
-        self.assertAllClose(imag_ref, imag_output)
+        self.assertAllClose(real_output, real_ref, atol=1e-5, rtol=1e-5)
+        self.assertAllClose(imag_output, imag_ref, atol=1e-5, rtol=1e-5)
 
     def test_fft2(self):
         real = np.random.random((2, 4, 3))
@@ -729,8 +923,8 @@ class MathOpsCorrectnessTest(testing.TestCase):
         ref = np.fft.fft2(complex_arr)
         real_ref = np.real(ref)
         imag_ref = np.imag(ref)
-        self.assertAllClose(real_ref, real_output)
-        self.assertAllClose(imag_ref, imag_output)
+        self.assertAllClose(real_output, real_ref, atol=1e-5, rtol=1e-5)
+        self.assertAllClose(imag_output, imag_ref, atol=1e-5, rtol=1e-5)
 
     def test_ifft2(self):
         real = np.random.random((2, 4, 3)).astype(np.float32)
@@ -741,8 +935,8 @@ class MathOpsCorrectnessTest(testing.TestCase):
         ref = np.fft.ifft2(complex_arr)
         real_ref = np.real(ref)
         imag_ref = np.imag(ref)
-        self.assertAllClose(real_ref, real_output)
-        self.assertAllClose(imag_ref, imag_output)
+        self.assertAllClose(real_output, real_ref, atol=1e-5, rtol=1e-5)
+        self.assertAllClose(imag_output, imag_ref, atol=1e-5, rtol=1e-5)
 
     @parameterized.parameters([(None,), (3,), (15,)])
     def test_rfft(self, n):
@@ -752,8 +946,8 @@ class MathOpsCorrectnessTest(testing.TestCase):
         ref = np.fft.rfft(x, n=n)
         real_ref = np.real(ref)
         imag_ref = np.imag(ref)
-        self.assertAllClose(real_ref, real_output, atol=1e-5, rtol=1e-5)
-        self.assertAllClose(imag_ref, imag_output, atol=1e-5, rtol=1e-5)
+        self.assertAllClose(real_output, real_ref, atol=1e-5, rtol=1e-5)
+        self.assertAllClose(imag_output, imag_ref, atol=1e-5, rtol=1e-5)
 
         # Test N-D case.
         x = np.random.random((2, 3, 10))
@@ -761,8 +955,8 @@ class MathOpsCorrectnessTest(testing.TestCase):
         ref = np.fft.rfft(x, n=n)
         real_ref = np.real(ref)
         imag_ref = np.imag(ref)
-        self.assertAllClose(real_ref, real_output, atol=1e-5, rtol=1e-5)
-        self.assertAllClose(imag_ref, imag_output, atol=1e-5, rtol=1e-5)
+        self.assertAllClose(real_output, real_ref, atol=1e-5, rtol=1e-5)
+        self.assertAllClose(imag_output, imag_ref, atol=1e-5, rtol=1e-5)
 
     @parameterized.parameters([(None,), (3,), (15,)])
     def test_irfft(self, n):
@@ -804,8 +998,8 @@ class MathOpsCorrectnessTest(testing.TestCase):
         real_ref, imag_ref = _stft(
             x, sequence_length, sequence_stride, fft_length, window, center
         )
-        self.assertAllClose(real_ref, real_output, atol=1e-5, rtol=1e-5)
-        self.assertAllClose(imag_ref, imag_output, atol=1e-5, rtol=1e-5)
+        self.assertAllClose(real_output, real_ref, atol=1e-5, rtol=1e-5)
+        self.assertAllClose(imag_output, imag_ref, atol=1e-5, rtol=1e-5)
 
         # Test N-D case.
         x = np.random.random((2, 3, 32))
@@ -815,8 +1009,8 @@ class MathOpsCorrectnessTest(testing.TestCase):
         real_ref, imag_ref = _stft(
             x, sequence_length, sequence_stride, fft_length, window, center
         )
-        self.assertAllClose(real_ref, real_output, atol=1e-5, rtol=1e-5)
-        self.assertAllClose(imag_ref, imag_output, atol=1e-5, rtol=1e-5)
+        self.assertAllClose(real_output, real_ref, atol=1e-5, rtol=1e-5)
+        self.assertAllClose(imag_output, imag_ref, atol=1e-5, rtol=1e-5)
 
     @parameterized.parameters(
         [
@@ -827,6 +1021,8 @@ class MathOpsCorrectnessTest(testing.TestCase):
             (8, 4, 8, "hann", False),
             (32, 8, 32, np.ones((32,)), True),
             (32, 8, 32, None, True),
+            (1, 1, 1, "hann", True),
+            (1, 1, 1, None, True),
         ]
     )
     def test_istft(
@@ -855,14 +1051,14 @@ class MathOpsCorrectnessTest(testing.TestCase):
             window=window,
             center=center,
         )
-        if backend.backend() in ("numpy", "jax", "torch"):
+        if backend.backend() in ("numpy", "jax", "torch", "openvino"):
             # these backends have different implementation for the boundary of
             # the output, so we need to truncate 5% before assertAllClose
             truncated_len = int(output.shape[-1] * 0.05)
             output = output[..., truncated_len:-truncated_len]
             ref = ref[..., truncated_len:-truncated_len]
         # Nans are handled differently in different backends, so zero them out.
-        output = np.nan_to_num(backend.convert_to_numpy(output), nan=0.0)
+        output = np.nan_to_num(backend.ops.convert_to_numpy(output), nan=0.0)
         ref = np.nan_to_num(ref, nan=0.0)
         self.assertAllClose(output, ref, atol=1e-5, rtol=1e-5)
 
@@ -887,14 +1083,14 @@ class MathOpsCorrectnessTest(testing.TestCase):
             window=window,
             center=center,
         )
-        if backend.backend() in ("numpy", "jax", "torch"):
+        if backend.backend() in ("numpy", "jax", "torch", "openvino"):
             # these backends have different implementation for the boundary of
             # the output, so we need to truncate 5% before assertAllClose
             truncated_len = int(output.shape[-1] * 0.05)
             output = output[..., truncated_len:-truncated_len]
             ref = ref[..., truncated_len:-truncated_len]
         # Nans are handled differently in different backends, so zero them out.
-        output = np.nan_to_num(backend.convert_to_numpy(output), nan=0.0)
+        output = np.nan_to_num(backend.ops.convert_to_numpy(output), nan=0.0)
         ref = np.nan_to_num(ref, nan=0.0)
         self.assertAllClose(output, ref, atol=1e-5, rtol=1e-5)
 
@@ -914,7 +1110,7 @@ class MathOpsCorrectnessTest(testing.TestCase):
         output_from_erf_op = kmath.erf(sample_values)
 
         # Assert that the outputs are close
-        self.assertAllClose(expected_output, output_from_erf_op, atol=1e-4)
+        self.assertAllClose(output_from_erf_op, expected_output, atol=1e-4)
 
     def test_erf_operation_dtype(self):
         # Test for float32 and float64 data types
@@ -924,14 +1120,30 @@ class MathOpsCorrectnessTest(testing.TestCase):
             )
             expected_output = scipy.special.erf(sample_values)
             output_from_erf_op = kmath.erf(sample_values)
-            self.assertAllClose(expected_output, output_from_erf_op, atol=1e-4)
+            self.assertAllClose(output_from_erf_op, expected_output, atol=1e-4)
 
     def test_erf_operation_edge_cases(self):
         # Test for edge cases
         edge_values = np.array([1e5, -1e5, 1e-5, -1e-5], dtype=np.float64)
         expected_output = scipy.special.erf(edge_values)
         output_from_edge_erf_op = kmath.erf(edge_values)
-        self.assertAllClose(expected_output, output_from_edge_erf_op, atol=1e-4)
+        self.assertAllClose(output_from_edge_erf_op, expected_output, atol=1e-4)
+
+    def test_erfc_operation_basic(self):
+        sample_values = np.array([-3.0, -2.0, -1.0, 0.0, 1.0, 2.0, 3.0])
+
+        expected_output = scipy.special.erfc(sample_values)
+        output_from_erfc_op = kmath.erfc(sample_values)
+
+        self.assertAllClose(output_from_erfc_op, expected_output, atol=1e-4)
+
+    def test_erfc_operation_edge_cases(self):
+        edge_values = np.array([1e5, -1e5, 1e-5, -1e-5], dtype=np.float64)
+        expected_output = scipy.special.erfc(edge_values)
+        output_from_edge_erfc_op = kmath.erfc(edge_values)
+        self.assertAllClose(
+            output_from_edge_erfc_op, expected_output, atol=1e-4
+        )
 
     def test_erfinv_operation_basic(self):
         # Sample values for testing
@@ -944,7 +1156,7 @@ class MathOpsCorrectnessTest(testing.TestCase):
         output_from_erfinv_op = kmath.erfinv(sample_values)
 
         # Assert that the outputs are close
-        self.assertAllClose(expected_output, output_from_erfinv_op, atol=1e-4)
+        self.assertAllClose(output_from_erfinv_op, expected_output, atol=1e-4)
 
     def test_erfinv_operation_dtype(self):
         # Test for float32 and float64 data types
@@ -955,7 +1167,7 @@ class MathOpsCorrectnessTest(testing.TestCase):
             expected_output = scipy.special.erfinv(sample_values)
             output_from_erfinv_op = kmath.erfinv(sample_values)
             self.assertAllClose(
-                expected_output, output_from_erfinv_op, atol=1e-4
+                output_from_erfinv_op, expected_output, atol=1e-4
             )
 
     def test_erfinv_operation_edge_cases(self):
@@ -964,7 +1176,22 @@ class MathOpsCorrectnessTest(testing.TestCase):
         expected_output = scipy.special.erfinv(edge_values)
         output_from_edge_erfinv_op = kmath.erfinv(edge_values)
         self.assertAllClose(
-            expected_output, output_from_edge_erfinv_op, atol=1e-4
+            output_from_edge_erfinv_op, expected_output, atol=1e-4
+        )
+
+        # Inputs extremely close to (but not equal to) `1.0` and `-1.0` must
+        # produce a finite value (see keras-team/keras#23133).
+        near_ones = np.array(
+            [
+                np.nextafter(np.float32(1.0), np.float32(0.0)),
+                np.nextafter(np.float32(-1.0), np.float32(0.0)),
+            ],
+            dtype="float32",
+        )
+        expected_output = scipy.special.erfinv(near_ones.astype("float64"))
+        output_from_edge_erfinv_op = kmath.erfinv(near_ones)
+        self.assertAllClose(
+            output_from_edge_erfinv_op, expected_output, atol=0.1
         )
 
     def test_logdet(self):
@@ -979,6 +1206,86 @@ class MathOpsCorrectnessTest(testing.TestCase):
         )
         out = kmath.logdet(x)
         self.assertAllClose(out, -1.1178946, atol=1e-3)
+
+    def test_cdist_basic(self):
+        x = np.array([[0.0, 0.0], [1.0, 1.0]], dtype="float32")
+        y = np.array([[1.0, 0.0]], dtype="float32")
+        out = kmath.cdist(x, y)
+        expected = np.array([[1.0], [1.0]], dtype="float32")
+        self.assertAllClose(out, expected)
+        self.assertEqual(out.shape, (2, 1))
+
+    def test_cdist_invalid_last_dim(self):
+        x = np.random.rand(3, 4)
+        y = np.random.rand(5, 5)
+        with self.assertRaises(ValueError):
+            kmath.cdist(x, y)
+
+    def test_cdist_symbolic(self):
+        x = KerasTensor(shape=(None, 2), dtype="float32")
+        y = KerasTensor(shape=(1, 2), dtype="float32")
+        out = kmath.cdist(x, y)
+        self.assertEqual(out.shape, (None, 1))
+
+    def test_gammainc(self):
+        import scipy.special
+
+        x1 = np.array([[1.0, 2.0], [3.0, 4.0]], dtype="float32")
+        x2 = np.array([[0.5, 1.0], [2.0, 5.0]], dtype="float32")
+
+        out = kmath.gammainc(x1, x2)
+        expected = scipy.special.gammainc(x1, x2)
+
+        self.assertAllClose(out, expected)
+        self.assertEqual(out.shape, (2, 2))
+
+    @parameterized.named_parameters(named_product(BACKEND_AGNOSTIC_OPS))
+    def test_lgamma_operation_dtype(self, backend_agnostic_ops):
+        backend.config._set_use_backend_agnostic_ops(backend_agnostic_ops)
+        try:
+            for dtype in ("float32", "float64"):
+                sample_values = np.array(
+                    [1.0, 2.0, 3.0, 4.0, 5.0, 0.5, 1.5, 2.5, 3.5, 10.0],
+                    dtype=dtype,
+                )
+                expected_output = scipy.special.gammaln(sample_values)
+                output_from_lgamma_op = kmath.lgamma(sample_values)
+                self.assertAllClose(
+                    output_from_lgamma_op, expected_output, atol=1e-4
+                )
+        finally:
+            backend.config._set_use_backend_agnostic_ops(False)
+
+    @parameterized.named_parameters(named_product(BACKEND_AGNOSTIC_OPS))
+    def test_lgamma_operation_edge_cases(self, backend_agnostic_ops):
+        backend.config._set_use_backend_agnostic_ops(backend_agnostic_ops)
+        try:
+            edge_values = np.array(
+                [-0.5, -1.5, -2.5, 1e-5, 50.0, 100.0, float("inf")],
+                dtype=np.float64,
+            )
+            expected_output = scipy.special.gammaln(edge_values)
+            output_from_edge_lgamma_op = kmath.lgamma(edge_values)
+            self.assertAllClose(
+                output_from_edge_lgamma_op, expected_output, atol=1e-4
+            )
+        finally:
+            backend.config._set_use_backend_agnostic_ops(False)
+
+    @parameterized.named_parameters(named_product(BACKEND_AGNOSTIC_OPS))
+    def test_lgamma_operation_basic(self, backend_agnostic_ops):
+        backend.config._set_use_backend_agnostic_ops(backend_agnostic_ops)
+        try:
+            sample_values = np.array(
+                [1.0, 2.0, 3.0, 4.0, 5.0, 0.5, 1.5, 2.5, 3.5, 10.0]
+            )
+            expected_output = scipy.special.gammaln(sample_values)
+            output_from_lgamma_op = kmath.lgamma(sample_values)
+            self.assertAllClose(
+                output_from_lgamma_op, expected_output, atol=1e-4
+            )
+        finally:
+            backend.config._set_use_backend_agnostic_ops(False)
 
 
 class MathDtypeTest(testing.TestCase):
@@ -1005,6 +1312,183 @@ class MathDtypeTest(testing.TestCase):
     if backend.backend() == "torch":
         ALL_DTYPES = [x for x in ALL_DTYPES if x not in ("uint16", "uint32")]
         INT_DTYPES = [x for x in INT_DTYPES if x not in ("uint16", "uint32")]
+
+    @parameterized.named_parameters(
+        named_product(
+            dtypes=list(itertools.combinations(FLOAT_DTYPES + INT_DTYPES, 2))
+        )
+    )
+    def test_cdist(self, dtypes):
+        import jax.numpy as jnp
+
+        dtype1, dtype2 = dtypes
+
+        x = knp.ones((2, 3), dtype=dtype1)
+        y = knp.ones((4, 3), dtype=dtype2)
+
+        x_jax = jnp.ones((2, 3), dtype=dtype1)
+        y_jax = jnp.ones((4, 3), dtype=dtype2)
+
+        expected_dtype = standardize_dtype(
+            jnp.linalg.norm(
+                x_jax[:, None, :] - y_jax[None, :, :],
+                axis=-1,
+            ).dtype
+        )
+
+        self.assertEqual(
+            standardize_dtype(kmath.cdist(x, y).dtype),
+            expected_dtype,
+        )
+        self.assertEqual(
+            standardize_dtype(kmath.CDist().symbolic_call(x, y).dtype),
+            expected_dtype,
+        )
+
+    @parameterized.named_parameters(named_product(dtype=FLOAT_DTYPES))
+    def test_erf(self, dtype):
+        import jax.lax as lax
+        import jax.numpy as jnp
+
+        x = knp.ones((1,), dtype=dtype)
+        x_jax = jnp.ones((1,), dtype=dtype)
+
+        expected_dtype = standardize_dtype(lax.erf(x_jax).dtype)
+
+        self.assertEqual(standardize_dtype(kmath.erf(x).dtype), expected_dtype)
+        self.assertEqual(
+            standardize_dtype(kmath.Erf().symbolic_call(x).dtype),
+            expected_dtype,
+        )
+
+    @parameterized.named_parameters(named_product(dtype=FLOAT_DTYPES))
+    def test_erfc(self, dtype):
+        import jax.numpy as jnp
+        import jax.scipy.special as special
+
+        x = knp.ones((1,), dtype=dtype)
+        x_jax = jnp.ones((1,), dtype=dtype)
+
+        expected_dtype = standardize_dtype(special.erfc(x_jax).dtype)
+
+        self.assertEqual(
+            standardize_dtype(kmath.erfc(x).dtype),
+            expected_dtype,
+        )
+        self.assertEqual(
+            standardize_dtype(kmath.Erfc().symbolic_call(x).dtype),
+            expected_dtype,
+        )
+
+    @parameterized.named_parameters(named_product(dtype=FLOAT_DTYPES))
+    def test_erfinv(self, dtype):
+        import jax.numpy as jnp
+        import jax.scipy.special as special
+
+        x = knp.ones((1,), dtype=dtype)
+        x_jax = jnp.ones((1,), dtype=dtype)
+
+        expected_dtype = standardize_dtype(special.erfinv(x_jax).dtype)
+
+        self.assertEqual(
+            standardize_dtype(kmath.erfinv(x).dtype),
+            expected_dtype,
+        )
+        self.assertEqual(
+            standardize_dtype(kmath.Erfinv().symbolic_call(x).dtype),
+            expected_dtype,
+        )
+
+    @parameterized.named_parameters(
+        named_product(
+            dtypes=list(itertools.combinations(FLOAT_DTYPES + INT_DTYPES, 2))
+        )
+    )
+    def test_gammainc(self, dtypes):
+        import jax.numpy as jnp
+        import jax.scipy.special
+
+        dtype1, dtype2 = dtypes
+
+        x1 = knp.ones((2, 3), dtype=dtype1)
+        x2 = knp.ones((2, 3), dtype=dtype2)
+
+        x1_jax = jnp.ones((2, 3), dtype=dtype1)
+        x2_jax = jnp.ones((2, 3), dtype=dtype2)
+
+        expected_dtype = standardize_dtype(
+            jax.scipy.special.gammainc(x1_jax, x2_jax).dtype
+        )
+
+        self.assertEqual(
+            standardize_dtype(kmath.gammainc(x1, x2).dtype),
+            expected_dtype,
+        )
+        self.assertEqual(
+            standardize_dtype(kmath.Gammainc().symbolic_call(x1, x2).dtype),
+            expected_dtype,
+        )
+
+    @parameterized.named_parameters(
+        named_product(BACKEND_AGNOSTIC_OPS, dtype=FLOAT_DTYPES)
+    )
+    def test_lgamma(self, backend_agnostic_ops, dtype):
+        import jax.lax as lax
+        import jax.numpy as jnp
+
+        x = knp.ones((1,), dtype=dtype)
+        x_jax = jnp.ones((1,), dtype=dtype)
+
+        expected_dtype = standardize_dtype(lax.lgamma(x_jax).dtype)
+
+        backend.config._set_use_backend_agnostic_ops(backend_agnostic_ops)
+        try:
+            self.assertEqual(
+                standardize_dtype(kmath.lgamma(x).dtype), expected_dtype
+            )
+            self.assertEqual(
+                standardize_dtype(kmath.Lgamma().symbolic_call(x).dtype),
+                expected_dtype,
+            )
+        finally:
+            backend.config._set_use_backend_agnostic_ops(False)
+
+    @parameterized.named_parameters(named_product(dtype=FLOAT_DTYPES))
+    def test_logsumexp(self, dtype):
+        import jax.numpy as jnp
+        import jax.scipy.special as jsp
+
+        x = knp.ones((2, 3), dtype=dtype)
+        x_jax = jnp.ones((2, 3), dtype=dtype)
+
+        expected_dtype = standardize_dtype(jsp.logsumexp(x_jax).dtype)
+
+        self.assertEqual(
+            standardize_dtype(kmath.logsumexp(x).dtype),
+            expected_dtype,
+        )
+        self.assertEqual(
+            standardize_dtype(kmath.Logsumexp().symbolic_call(x).dtype),
+            expected_dtype,
+        )
+
+    @parameterized.named_parameters(named_product(dtype=FLOAT_DTYPES))
+    def test_rsqrt(self, dtype):
+        import jax.lax as lax
+
+        x = knp.ones((1,), dtype=dtype)
+        x_jax = jnp.ones((1,), dtype=dtype)
+
+        expected_dtype = standardize_dtype(lax.rsqrt(x_jax).dtype)
+
+        self.assertEqual(
+            standardize_dtype(kmath.rsqrt(x).dtype),
+            expected_dtype,
+        )
+        self.assertEqual(
+            standardize_dtype(kmath.Rsqrt().symbolic_call(x).dtype),
+            expected_dtype,
+        )
 
 
 class ExtractSequencesOpTest(testing.TestCase):
@@ -1081,6 +1565,73 @@ class SegmentMaxTest(testing.TestCase):
         self.assertAllClose(output, expected_output)
 
 
+class SegmentMinTest(testing.TestCase):
+    def test_segment_min_call(self):
+        data = np.array([[1, 4, 7], [2, 5, 8], [3, 6, 9]], dtype=np.float32)
+        segment_ids = np.array([0, 0, 1], dtype=np.int32)
+        num_segments = 2
+        sorted_segments = False
+
+        segment_min_op = kmath.SegmentMin(
+            num_segments=num_segments, sorted=sorted_segments
+        )
+
+        output = segment_min_op.call(data, segment_ids)
+        expected_output = np.array([[1, 4, 7], [3, 6, 9]], dtype=np.float32)
+        self.assertAllClose(output, expected_output)
+
+
+class SegmentProdTest(testing.TestCase):
+    def test_segment_prod_call(self):
+        data = np.array([[1, 4, 7], [3, 6, 9], [2, 5, 8]], dtype=np.float32)
+        segment_ids = np.array([0, 1, 0], dtype=np.int32)
+
+        segment_prod_op = kmath.SegmentProd(num_segments=2, sorted=False)
+
+        output = segment_prod_op.call(data, segment_ids)
+        expected_output = np.array(
+            [[2, 20, 56], [3, 6, 9]],
+            dtype=np.float32,
+        )
+        self.assertAllClose(output, expected_output)
+
+    @pytest.mark.skipif(
+        backend.backend() == "tensorflow",
+        reason="Argument `num_segments` cannot be set when sorted is True "
+        f"when using the {backend.backend()}",
+    )
+    def test_segment_prod_call_sorted(self):
+        data = np.array([[1, 4, 7], [2, 5, 8], [3, 6, 9]], dtype=np.float32)
+        segment_ids = np.array([0, 0, 1], dtype=np.int32)
+
+        segment_prod_op = kmath.SegmentProd(num_segments=2, sorted=True)
+
+        output = segment_prod_op.call(data, segment_ids)
+        expected_output = np.array(
+            [[2, 20, 56], [3, 6, 9]],
+            dtype=np.float32,
+        )
+        self.assertAllClose(output, expected_output)
+
+    @pytest.mark.skipif(
+        backend.backend() == "jax",
+        reason="Argument `num_segments` must be set "
+        f"when using the {backend.backend()}",
+    )
+    def test_segment_prod_call_sorted_without_num_segments(self):
+        data = np.array([[1, 4, 7], [2, 5, 8], [3, 6, 9]], dtype=np.float32)
+        segment_ids = np.array([0, 0, 1], dtype=np.int32)
+
+        segment_prod_op = kmath.SegmentProd(sorted=True)
+
+        output = segment_prod_op.call(data, segment_ids)
+        expected_output = np.array(
+            [[2, 20, 56], [3, 6, 9]],
+            dtype=np.float32,
+        )
+        self.assertAllClose(output, expected_output)
+
+
 class TopKTest(testing.TestCase):
     def test_top_k_call_values(self):
         data = np.array([[1, 3, 2], [4, 6, 5]], dtype=np.float32)
@@ -1099,6 +1650,14 @@ class TopKTest(testing.TestCase):
         _, indices = top_k_op.call(data)
         expected_indices = np.array([[1, 2], [1, 2]], dtype=np.int32)
         self.assertAllClose(indices, expected_indices)
+
+    def test_top_k_operation_config_and_symbolic_call(self):
+        top_k_op = kmath.TopK(k=2, sorted=True, is_stable=True)
+        self.assertEqual(top_k_op.get_config()["is_stable"], True)
+        data = np.array([3, 5, 5, 2, 5, 1], dtype=np.float32)
+        values, indices = top_k_op.call(data)
+        self.assertAllClose(values, [5, 5])
+        self.assertAllClose(indices, [1, 2])
 
 
 class InTopKTest(testing.TestCase):
@@ -1125,6 +1684,13 @@ class LogsumexpTest(testing.TestCase):
         expected_output = np.log(
             np.sum(np.exp(x), axis=axis, keepdims=keepdims)
         )
+        self.assertAllClose(output, expected_output)
+
+    def test_logsumexp_list_input(self):
+        x = [[1.0, 2.0], [3.0, 4.0]]
+        logsumexp_op = kmath.Logsumexp()
+        output = logsumexp_op.call(x)
+        expected_output = np.log(np.sum(np.exp(x)))
         self.assertAllClose(output, expected_output)
 
 
@@ -1471,6 +2037,26 @@ class TestMathErrors(testing.TestCase):
             kmath.stft(
                 x, sequence_length, sequence_stride, fft_length, window=window
             )
+
+    @parameterized.parameters([0, -5, 1.5])
+    def test_stft_invalid_sequence_stride(self, sequence_stride):
+        x = np.array([1.0, 2.0, 3.0, 4.0])
+        sequence_length = 2
+        fft_length = 4
+        with self.assertRaisesRegex(
+            ValueError, "`sequence_stride` must be a positive integer"
+        ):
+            kmath.stft(x, sequence_length, sequence_stride, fft_length)
+
+    @parameterized.parameters([0, -5, 1.5])
+    def test_istft_invalid_sequence_stride(self, sequence_stride):
+        x = (np.array([[1.0, 2.0]]), np.array([[3.0, 4.0]]))
+        sequence_length = 2
+        fft_length = 4
+        with self.assertRaisesRegex(
+            ValueError, "`sequence_stride` must be a positive integer"
+        ):
+            kmath.istft(x, sequence_length, sequence_stride, fft_length)
 
     def test_istft_invalid_window_shape_2D_inputs(self):
         # backend agnostic error message

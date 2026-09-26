@@ -1,10 +1,10 @@
 import collections
 import json
+import math
 import os.path
 import pprint
 import zipfile
 
-import h5py
 import numpy as np
 import rich.console
 
@@ -14,6 +14,7 @@ from keras.src.saving import saving_lib
 from keras.src.saving.saving_lib import H5IOStore
 from keras.src.utils import naming
 from keras.src.utils import summary_utils
+from keras.src.utils.module_utils import h5py
 
 try:
     import IPython as ipython
@@ -76,15 +77,20 @@ class KerasFileEditor:
 
         if filepath.endswith(".keras"):
             zf = zipfile.ZipFile(filepath, "r")
+            # Reject a decompression-bomb weights member up front, mirroring
+            # `saving_lib._load_model_from_fileobj`.
+            saving_lib._reject_zip_bomb(zf, f"{saving_lib._VARS_FNAME}.h5")
             weights_store = H5IOStore(
                 f"{saving_lib._VARS_FNAME}.h5",
                 archive=zf,
                 mode="r",
             )
-            with zf.open(saving_lib._CONFIG_FILENAME, "r") as f:
-                config_json = f.read()
-            with zf.open(saving_lib._METADATA_FILENAME, "r") as f:
-                metadata_json = f.read()
+            config_json = saving_lib._safe_zip_read(
+                zf, saving_lib._CONFIG_FILENAME
+            )
+            metadata_json = saving_lib._safe_zip_read(
+                zf, saving_lib._METADATA_FILENAME
+            )
             self.config = json.loads(config_json)
             self.metadata = json.loads(metadata_json)
 
@@ -473,6 +479,16 @@ class KerasFileEditor:
             # IMPORTANT:
             # Never mutate inner_path; use local variable.
             current_inner_path = f"{inner_path}/{key}"
+
+            # Reject HDF5 `ExternalLink`/`SoftLink`.
+            child_class = data.get(
+                key, default=None, getclass=True, getlink=True
+            )
+            if child_class in (h5py.ExternalLink, h5py.SoftLink):
+                raise ValueError(
+                    f"Not allowed: H5 file with {child_class.__name__}"
+                )
+
             value = data[key]
 
             # ------------------------------------------------------
@@ -483,14 +499,14 @@ class KerasFileEditor:
                 if len(value) == 0:
                     continue
 
-                # Skip empty "vars" groups
-                if "vars" in value.keys() and len(value["vars"]) == 0:
-                    continue
-
                 # Recurse into "vars" subgroup when present
                 if "vars" in value.keys():
+                    vars_group = saving_lib.safe_get_h5_group(value, "vars")
+                    # Skip empty "vars" groups
+                    if len(vars_group) == 0:
+                        continue
                     result[key], metadata = self._extract_weights_from_store(
-                        value["vars"],
+                        vars_group,
                         metadata=metadata,
                         inner_path=current_inner_path,
                     )
@@ -518,6 +534,12 @@ class KerasFileEditor:
                     f"{value.external}"
                 )
 
+            if value.is_virtual:
+                raise ValueError(
+                    "Not allowed: H5 file with virtual Dataset at "
+                    f"{current_inner_path}"
+                )
+
             shape = value.shape
             dtype = value.dtype
 
@@ -540,7 +562,7 @@ class KerasFileEditor:
                 )
 
             # Safe product computation (Python int is unbounded)
-            num_elems = int(np.prod(shape))
+            num_elems = math.prod(shape)
 
             # ------------------------------------------------------
             # Validate TOTAL memory size

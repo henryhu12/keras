@@ -145,7 +145,7 @@ class QuantizationConfigTest(testing.TestCase):
             validate_and_resolve_config("invalid_mode", None)
 
         # 6. GPTQ without config
-        with self.assertRaisesRegex(ValueError, "must pass a `GPTQConfig`"):
+        with self.assertRaisesRegex(ValueError, "must be of type `GPTQConfig`"):
             validate_and_resolve_config("gptq", None)
 
         # 7. Contradictory config
@@ -180,7 +180,7 @@ class QuantizationConfigTest(testing.TestCase):
         Test custom quantizer serialization for model save and load.
         """
         # Setup
-        weight_range = (-100, 100)
+        weight_range = [-100, 100]
         custom_quantizer = AbsMaxQuantizer(axis=0, value_range=weight_range)
         config = Int8QuantizationConfig(
             weight_quantizer=custom_quantizer,

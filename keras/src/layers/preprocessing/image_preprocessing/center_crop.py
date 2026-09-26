@@ -64,7 +64,7 @@ class CenterCrop(BaseImagePreprocessingLayer):
             images = data["images"]
         else:
             images = data
-        shape = self.backend.core.shape(images)
+        shape = self.backend.ops.shape(images)
         return {"input_shape": shape}
 
     def transform_labels(self, labels, transformation, training=True):
@@ -84,12 +84,12 @@ class CenterCrop(BaseImagePreprocessingLayer):
 
         def _get_clipped_bbox(bounding_boxes, h_end, h_start, w_end, w_start):
             bboxes = bounding_boxes["boxes"]
-            x1, y1, x2, y2 = self.backend.numpy.split(bboxes, 4, axis=-1)
-            x1 = self.backend.numpy.clip(x1, w_start, w_end) - w_start
-            y1 = self.backend.numpy.clip(y1, h_start, h_end) - h_start
-            x2 = self.backend.numpy.clip(x2, w_start, w_end) - w_start
-            y2 = self.backend.numpy.clip(y2, h_start, h_end) - h_start
-            bounding_boxes["boxes"] = self.backend.numpy.concatenate(
+            x1, y1, x2, y2 = self.backend.ops.numpy.split(bboxes, 4, axis=-1)
+            x1 = self.backend.ops.numpy.clip(x1, w_start, w_end) - w_start
+            y1 = self.backend.ops.numpy.clip(y1, h_start, h_end) - h_start
+            x2 = self.backend.ops.numpy.clip(x2, w_start, w_end) - w_start
+            y2 = self.backend.ops.numpy.clip(y2, h_start, h_end) - h_start
+            bounding_boxes["boxes"] = self.backend.ops.numpy.concatenate(
                 [x1, y1, x2, y2], axis=-1
             )
             return bounding_boxes
@@ -177,13 +177,19 @@ class CenterCrop(BaseImagePreprocessingLayer):
     def transform_segmentation_masks(
         self, segmentation_masks, transformation, training=True
     ):
-        return self.transform_images(
-            segmentation_masks, transformation, training=training
-        )
+        # Segmentation masks hold discrete class indices. Use nearest-neighbor
+        # interpolation on the resize path so no new class values are invented,
+        # and keep the original (typically integer) dtype by not casting to
+        # `compute_dtype`.
+        masks = self.backend.ops.convert_to_tensor(segmentation_masks)
+        return self._center_crop(masks, interpolation="nearest")
 
     def transform_images(self, images, transformation=None, training=True):
-        inputs = self.backend.cast(images, self.compute_dtype)
-        inputs_shape = self.backend.shape(inputs)
+        images = self.backend.ops.cast(images, self.compute_dtype)
+        return self._center_crop(images, interpolation="bilinear")
+
+    def _center_crop(self, inputs, interpolation="bilinear"):
+        inputs_shape = self.backend.ops.shape(inputs)
 
         if self.data_format == "channels_first":
             init_height = inputs_shape[-2]
@@ -232,6 +238,7 @@ class CenterCrop(BaseImagePreprocessingLayer):
         return image_utils.smart_resize(
             inputs,
             [self.height, self.width],
+            interpolation=interpolation,
             data_format=self.data_format,
             backend_module=self.backend,
         )

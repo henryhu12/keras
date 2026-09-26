@@ -17,16 +17,29 @@ from keras.src.ops import random as krandom
 from keras.src.testing.test_utils import named_product
 
 
+def _bf16_exact(shape):
+    """Random float32 values exactly representable in bfloat16.
+
+    The reconstruct_patches round-trip tests assert
+    reconstruct(extract(x)) == x with a tight tolerance. extract_patches
+    is conv-based, and TPUs compute float32 convolutions in bfloat16 by
+    default, so arbitrary float32 values are rounded during extraction.
+    Multiples of 1/256 in [0, 1) carry at most 8 significand bits, so
+    the extraction stays lossless on every device.
+    """
+    return (np.round(np.random.random(shape) * 256.0) / 256.0).astype("float32")
+
+
 class ImageOpsDynamicShapeTest(testing.TestCase):
     def setUp(self):
+        super().setUp()
         # Defaults to channels_last
         self.data_format = backend.image_data_format()
         backend.set_image_data_format("channels_last")
-        return super().setUp()
 
     def tearDown(self):
+        super().tearDown()
         backend.set_image_data_format(self.data_format)
-        return super().tearDown()
 
     def test_rgb_to_grayscale(self):
         # Test channels_last
@@ -83,6 +96,34 @@ class ImageOpsDynamicShapeTest(testing.TestCase):
         x = KerasTensor([3, None, None])
         out = kimage.resize(x, size=(15, 15))
         self.assertEqual(out.shape, (3, 15, 15))
+
+    def test_resize_with_crop_and_pad_dynamic_shape(self):
+        # Test channels_last
+        x = KerasTensor([None, None, None, 3])
+        out = kimage.resize(x, size=(15, 10), crop_to_aspect_ratio=True)
+        self.assertEqual(out.shape, (None, 15, 10, 3))
+        out = kimage.resize(x, size=(15, 10), pad_to_aspect_ratio=True)
+        self.assertEqual(out.shape, (None, 15, 10, 3))
+
+        x = KerasTensor([None, None, 3])
+        out = kimage.resize(x, size=(15, 10), crop_to_aspect_ratio=True)
+        self.assertEqual(out.shape, (15, 10, 3))
+        out = kimage.resize(x, size=(15, 10), pad_to_aspect_ratio=True)
+        self.assertEqual(out.shape, (15, 10, 3))
+
+        # Test channels_first
+        backend.set_image_data_format("channels_first")
+        x = KerasTensor([None, 3, None, None])
+        out = kimage.resize(x, size=(15, 10), crop_to_aspect_ratio=True)
+        self.assertEqual(out.shape, (None, 3, 15, 10))
+        out = kimage.resize(x, size=(15, 10), pad_to_aspect_ratio=True)
+        self.assertEqual(out.shape, (None, 3, 15, 10))
+
+        x = KerasTensor([3, None, None])
+        out = kimage.resize(x, size=(15, 10), crop_to_aspect_ratio=True)
+        self.assertEqual(out.shape, (3, 15, 10))
+        out = kimage.resize(x, size=(15, 10), pad_to_aspect_ratio=True)
+        self.assertEqual(out.shape, (3, 15, 10))
 
     def test_affine_transform(self):
         # Test channels_last
@@ -142,6 +183,37 @@ class ImageOpsDynamicShapeTest(testing.TestCase):
         out = kimage.extract_patches_3d(x, 5)
         self.assertEqual(out.shape, (None, 375, 4, 4, 4))
 
+    def test_reconstruct_patches(self):
+        # 2D: patches (None, 4, 4, 75) -> image (None, 20, 20, 3)
+        patches = KerasTensor([None, 4, 4, 75])
+        out = kimage.reconstruct_patches(
+            patches,
+            size=(5, 5),
+            output_size=(20, 20),
+            padding="valid",
+        )
+        self.assertEqual(out.shape, (None, 20, 20, 3))
+        # Dynamic grid dims still resolve channels from flat dim.
+        patches_dyn = KerasTensor([None, None, None, 75])
+        out = kimage.reconstruct_patches(
+            patches_dyn,
+            size=(5, 5),
+            output_size=(20, 20),
+            padding="same",
+        )
+        self.assertEqual(out.shape, (None, 20, 20, 3))
+
+    def test_reconstruct_patches_3d(self):
+        # 3D: patches (None, 4, 4, 4, 375) -> volume (None, 20, 20, 20, 3)
+        patches = KerasTensor([None, 4, 4, 4, 375])
+        out = kimage.reconstruct_patches(
+            patches,
+            size=(5, 5, 5),
+            output_size=(20, 20, 20),
+            padding="valid",
+        )
+        self.assertEqual(out.shape, (None, 20, 20, 20, 3))
+
     def test_map_coordinates(self):
         input = KerasTensor([20, 20, None])
         coordinates = KerasTensor([3, 15, 15, None])
@@ -192,6 +264,34 @@ class ImageOpsDynamicShapeTest(testing.TestCase):
         x = KerasTensor([3, None, None])
         out = kimage.crop_images(x, 2, 3, target_height=10, target_width=20)
         self.assertEqual(out.shape, (3, 10, 20))
+
+    def test_pad_images_invalid_rank_keras_input(self):
+        x = KerasTensor([None, 16])
+        with self.assertRaises(ValueError):
+            kimage.pad_images(x, 0, 0, target_height=16, target_width=16)
+
+    def test_crop_images_invalid_rank_keras_input(self):
+        x = KerasTensor([None, 16])
+        with self.assertRaises(ValueError):
+            kimage.crop_images(x, 0, 0, target_height=10, target_width=16)
+
+    def test_pad_images_invalid_padding_params_keras_input(self):
+        x = KerasTensor([None, 16, 16, 3])
+        with self.assertRaisesRegex(
+            ValueError,
+            "Must specify exactly two of top_padding, bottom_padding, "
+            "target_height",
+        ):
+            kimage.pad_images(x, 0, 0, 0, target_height=16, target_width=16)
+
+    def test_crop_images_invalid_cropping_params_keras_input(self):
+        x = KerasTensor([None, 16, 16, 3])
+        with self.assertRaisesRegex(
+            ValueError,
+            "Must specify exactly two of top_cropping, bottom_cropping, "
+            "target_height",
+        ):
+            kimage.crop_images(x, 0, 0, 0, target_height=10, target_width=16)
 
     def test_perspective_transform(self):
         # Test channels_last
@@ -251,14 +351,14 @@ class ImageOpsDynamicShapeTest(testing.TestCase):
 
 class ImageOpsStaticShapeTest(testing.TestCase):
     def setUp(self):
+        super().setUp()
         # Defaults to channels_last
         self.data_format = backend.image_data_format()
         backend.set_image_data_format("channels_last")
-        return super().setUp()
 
     def tearDown(self):
+        super().tearDown()
         backend.set_image_data_format(self.data_format)
-        return super().tearDown()
 
     def test_rgb_to_grayscale(self):
         # Test channels_last
@@ -358,6 +458,419 @@ class ImageOpsStaticShapeTest(testing.TestCase):
         out = kimage.extract_patches_3d(x, 5)
         self.assertEqual(out.shape, (375, 4, 4, 4))
 
+    def test_reconstruct_patches(self):
+        # 2D unbatched: patches (4, 4, 75) -> image (20, 20, 3)
+        patches = KerasTensor([4, 4, 75])
+        out = kimage.reconstruct_patches(
+            patches,
+            size=(5, 5),
+            output_size=(20, 20),
+            padding="valid",
+        )
+        self.assertEqual(out.shape, (20, 20, 3))
+
+    def test_reconstruct_patches_3d(self):
+        # 3D unbatched: patches (4, 4, 4, 375) -> volume (20, 20, 20, 3)
+        patches = KerasTensor([4, 4, 4, 375])
+        out = kimage.reconstruct_patches(
+            patches,
+            size=(5, 5, 5),
+            output_size=(20, 20, 20),
+            padding="valid",
+        )
+        self.assertEqual(out.shape, (20, 20, 20, 3))
+
+    def test_reconstruct_patches_output_size_not_tuple(self):
+        patches = np.zeros((1, 4, 4, 75), dtype="float32")
+        with self.assertRaisesRegex(TypeError, "tuple or list"):
+            kimage.reconstruct_patches(
+                patches,
+                size=(5, 5),
+                output_size=20,
+                padding="valid",
+            )
+        patches_3d = np.zeros((1, 4, 4, 4, 375), dtype="float32")
+        with self.assertRaisesRegex(TypeError, "tuple or list"):
+            kimage.reconstruct_patches(
+                patches_3d,
+                size=(5, 5, 5),
+                output_size=20,
+                padding="valid",
+            )
+
+    def test_reconstruct_patches_output_size_out_of_range_same(self):
+        # 2D: gH=4, pH=5 → valid H range is (15, 20]. 30 is too large.
+        patches = np.zeros((1, 4, 4, 75), dtype="float32")
+        with self.assertRaisesRegex(ValueError, "padding='same'.*height"):
+            kimage.reconstruct_patches(
+                patches,
+                size=(5, 5),
+                output_size=(30, 20),
+                padding="same",
+            )
+        with self.assertRaisesRegex(ValueError, "padding='same'.*width"):
+            kimage.reconstruct_patches(
+                patches,
+                size=(5, 5),
+                output_size=(20, 30),
+                padding="same",
+            )
+        # 3D: gD=4, pD=5 → valid D range is (15, 20]. 10 is too small.
+        patches_3d = np.zeros((1, 4, 4, 4, 375), dtype="float32")
+        with self.assertRaisesRegex(ValueError, "padding='same'.*depth"):
+            kimage.reconstruct_patches(
+                patches_3d,
+                size=(5, 5, 5),
+                output_size=(10, 20, 20),
+                padding="same",
+            )
+        with self.assertRaisesRegex(ValueError, "padding='same'.*height"):
+            kimage.reconstruct_patches(
+                patches_3d,
+                size=(5, 5, 5),
+                output_size=(20, 30, 20),
+                padding="same",
+            )
+        with self.assertRaisesRegex(ValueError, "padding='same'.*width"):
+            kimage.reconstruct_patches(
+                patches_3d,
+                size=(5, 5, 5),
+                output_size=(20, 20, 30),
+                padding="same",
+            )
+
+    def test_reconstruct_patches_invalid_size_length(self):
+        patches = np.zeros((1, 4, 4, 75), dtype="float32")
+        with self.assertRaisesRegex(ValueError, "length 2 or 3"):
+            kimage.reconstruct_patches(
+                patches,
+                size=(5,),
+                output_size=(20, 20),
+                padding="valid",
+            )
+
+    def test_reconstruct_patches_invalid_size_type(self):
+        patches = np.zeros((1, 4, 4, 75), dtype="float32")
+        with self.assertRaisesRegex(TypeError, "int or a tuple"):
+            kimage.reconstruct_patches(
+                patches,
+                size="not_a_size",
+                output_size=(20, 20),
+                padding="valid",
+            )
+
+    def test_reconstruct_patches_invalid_padding(self):
+        # _reconstruct_patches_2d raises for bad padding even though the
+        # public `reconstruct_patches` op doesn't pre-validate it.
+        patches = np.zeros((1, 4, 4, 75), dtype="float32")
+        with self.assertRaisesRegex(ValueError, "'same' or 'valid'"):
+            kimage.reconstruct_patches(
+                patches,
+                size=(5, 5),
+                output_size=(20, 20),
+                padding="reflect",
+            )
+        patches_3d = np.zeros((1, 4, 4, 4, 375), dtype="float32")
+        with self.assertRaisesRegex(ValueError, "'same' or 'valid'"):
+            kimage.reconstruct_patches(
+                patches_3d,
+                size=(5, 5, 5),
+                output_size=(20, 20, 20),
+                padding="reflect",
+            )
+
+    def test_reconstruct_patches_invalid_output_size_length(self):
+        patches = np.zeros((1, 4, 4, 75), dtype="float32")
+        with self.assertRaisesRegex(ValueError, "length 2"):
+            kimage.reconstruct_patches(
+                patches,
+                size=(5, 5),
+                output_size=(20, 20, 20),
+                padding="valid",
+            )
+        patches_3d = np.zeros((1, 4, 4, 4, 375), dtype="float32")
+        with self.assertRaisesRegex(ValueError, "length 3"):
+            kimage.reconstruct_patches(
+                patches_3d,
+                size=(5, 5, 5),
+                output_size=(20, 20),
+                padding="valid",
+            )
+
+    def test_reconstruct_patches_valid_size_mismatch(self):
+        # valid padding requires (grid - 1) * stride + size == output_size.
+        patches = np.zeros((1, 4, 4, 75), dtype="float32")
+        with self.assertRaisesRegex(ValueError, "requires output_size"):
+            kimage.reconstruct_patches(
+                patches,
+                size=(5, 5),
+                output_size=(19, 20),
+                padding="valid",
+            )
+        patches_3d = np.zeros((1, 4, 4, 4, 375), dtype="float32")
+        with self.assertRaisesRegex(ValueError, "requires output_size"):
+            kimage.reconstruct_patches(
+                patches_3d,
+                size=(5, 5, 5),
+                output_size=(20, 19, 20),
+                padding="valid",
+            )
+
+    def test_reconstruct_patches_unbatched_and_int_size(self):
+        # Unbatched input (3D for 2D, 4D for 3D) exercises the squeeze path.
+        # An int `size` exercises the int->tuple normalization (2D only;
+        # the 3D case requires an explicit length-3 tuple).
+        patches = np.zeros((4, 4, 75), dtype="float32")
+        out = kimage.reconstruct_patches(
+            patches,
+            size=5,
+            output_size=(20, 20),
+            padding="valid",
+        )
+        self.assertEqual(tuple(out.shape), (20, 20, 3))
+        patches_3d = np.zeros((4, 4, 4, 375), dtype="float32")
+        out = kimage.reconstruct_patches(
+            patches_3d,
+            size=(5, 5, 5),
+            output_size=(20, 20, 20),
+            padding="valid",
+        )
+        self.assertEqual(tuple(out.shape), (20, 20, 20, 3))
+
+    def test_reconstruct_patches_dispatches_to_3d(self):
+        # `reconstruct_patches` dispatches to the 3D path when size is a
+        # length-3 tuple.
+        patches = np.zeros((1, 4, 4, 4, 375), dtype="float32")
+        out = kimage.reconstruct_patches(
+            patches,
+            size=(5, 5, 5),
+            output_size=(20, 20, 20),
+            padding="valid",
+        )
+        self.assertEqual(tuple(out.shape), (1, 20, 20, 20, 3))
+
+    def test_reconstruct_patches_int_strides(self):
+        # int strides argument is broadcast to a tuple inside the validator.
+        patches = np.zeros((1, 4, 4, 75), dtype="float32")
+        out = kimage.reconstruct_patches(
+            patches,
+            size=(5, 5),
+            output_size=(20, 20),
+            strides=5,
+            padding="valid",
+        )
+        self.assertEqual(tuple(out.shape), (1, 20, 20, 3))
+
+    def test_reconstruct_patches_flat_not_divisible(self):
+        # Last dim 80 is not divisible by prod(size)=25.
+        patches = np.zeros((1, 4, 4, 80), dtype="float32")
+        with self.assertRaisesRegex(ValueError, "not divisible"):
+            kimage.reconstruct_patches(
+                patches,
+                size=(5, 5),
+                output_size=(20, 20),
+                padding="valid",
+            )
+        patches_3d = np.zeros((1, 4, 4, 4, 400), dtype="float32")
+        with self.assertRaisesRegex(ValueError, "not divisible"):
+            kimage.reconstruct_patches(
+                patches_3d,
+                size=(5, 5, 5),
+                output_size=(20, 20, 20),
+                padding="valid",
+            )
+
+    def test_reconstruct_patches_symbolic_validation(self):
+        # The symbolic path mirrors the eager checks when dims are static,
+        # so invalid graphs fail at build time instead of at run time.
+        patches = KerasTensor([None, 4, 4, 80])  # 80 not divisible by 25
+        with self.assertRaisesRegex(ValueError, "not divisible"):
+            kimage.reconstruct_patches(
+                patches,
+                size=(5, 5),
+                output_size=(20, 20),
+                padding="valid",
+            )
+        patches = KerasTensor([None, 4, 4, 75])
+        with self.assertRaisesRegex(ValueError, "requires output_size"):
+            kimage.reconstruct_patches(
+                patches,
+                size=(5, 5),
+                output_size=(19, 20),
+                padding="valid",
+            )
+        with self.assertRaisesRegex(ValueError, "padding='same'.*height"):
+            kimage.reconstruct_patches(
+                patches,
+                size=(5, 5),
+                output_size=(30, 20),
+                padding="same",
+            )
+        patches_3d = KerasTensor([None, 4, 4, 4, 375])
+        with self.assertRaisesRegex(ValueError, "requires output_size"):
+            kimage.reconstruct_patches(
+                patches_3d,
+                size=(5, 5, 5),
+                output_size=(20, 19, 20),
+                padding="valid",
+            )
+        with self.assertRaisesRegex(ValueError, "padding='same'.*depth"):
+            kimage.reconstruct_patches(
+                patches_3d,
+                size=(5, 5, 5),
+                output_size=(10, 20, 20),
+                padding="same",
+            )
+
+    def test_reconstruct_patches_channels_first(self):
+        # 2D channels_first batched: (B, pH*pW*C, gH, gW) -> (B, C, H, W)
+        patches = KerasTensor([2, 75, 4, 4])
+        out = kimage.reconstruct_patches(
+            patches,
+            size=(5, 5),
+            output_size=(20, 20),
+            padding="valid",
+            data_format="channels_first",
+        )
+        self.assertEqual(out.shape, (2, 3, 20, 20))
+        # 3D channels_first batched: (B, pD*pH*pW*C, gD, gH, gW)
+        patches_3d = KerasTensor([2, 375, 4, 4, 4])
+        out = kimage.reconstruct_patches(
+            patches_3d,
+            size=(5, 5, 5),
+            output_size=(20, 20, 20),
+            padding="valid",
+            data_format="channels_first",
+        )
+        self.assertEqual(out.shape, (2, 3, 20, 20, 20))
+        # The symbolic validation is data_format aware: the grid dims sit
+        # at the end in channels_first, and a mismatch still raises.
+        with self.assertRaisesRegex(ValueError, "requires output_size"):
+            kimage.reconstruct_patches(
+                KerasTensor([2, 75, 4, 4]),
+                size=(5, 5),
+                output_size=(19, 20),
+                padding="valid",
+                data_format="channels_first",
+            )
+
+    def test_reconstruct_patches_channels_first_bad_rank(self):
+        with self.assertRaisesRegex(ValueError, "unexpected rank"):
+            kimage.reconstruct_patches(
+                np.zeros((75, 4), dtype="float32"),
+                size=(5, 5),
+                output_size=(20, 20),
+                padding="valid",
+                data_format="channels_first",
+            )
+        with self.assertRaisesRegex(ValueError, "unexpected rank"):
+            kimage.reconstruct_patches(
+                np.zeros((375, 4, 4), dtype="float32"),
+                size=(5, 5, 5),
+                output_size=(20, 20, 20),
+                padding="valid",
+                data_format="channels_first",
+            )
+
+    def test_reconstruct_patches_autoinfer_valid(self):
+        # output_size omitted -> inferred from the (static) patch grid.
+        patches = KerasTensor([2, 4, 4, 75])
+        out = kimage.reconstruct_patches(patches, size=(5, 5), padding="valid")
+        self.assertEqual(out.shape, (2, 20, 20, 3))
+        patches_3d = KerasTensor([2, 4, 4, 4, 375])
+        out = kimage.reconstruct_patches(
+            patches_3d, size=(5, 5, 5), padding="valid"
+        )
+        self.assertEqual(out.shape, (2, 20, 20, 20, 3))
+        # channels_first: grid dims are the trailing axes.
+        patches_cf = KerasTensor([2, 75, 4, 4])
+        out = kimage.reconstruct_patches(
+            patches_cf,
+            size=(5, 5),
+            padding="valid",
+            data_format="channels_first",
+        )
+        self.assertEqual(out.shape, (2, 3, 20, 20))
+
+    def test_reconstruct_patches_autoinfer_dynamic_grid_symbolic(self):
+        # Dynamic grid + auto-infer -> spatial dims stay unknown (no raise).
+        patches = KerasTensor([2, None, None, 75])
+        out = kimage.reconstruct_patches(patches, size=(5, 5), padding="valid")
+        self.assertEqual(out.shape, (2, None, None, 3))
+        # Mixed static/dynamic grid -> static dims are still resolved.
+        patches = KerasTensor([2, None, 4, 75])
+        out = kimage.reconstruct_patches(patches, size=(5, 5), padding="valid")
+        self.assertEqual(out.shape, (2, None, 20, 3))
+
+    def test_reconstruct_patches_autoinfer_same_raises(self):
+        # Auto-infer is valid-only; same requires explicit output_size.
+        patches = np.zeros((2, 4, 4, 75), dtype="float32")
+        with self.assertRaisesRegex(ValueError, "only supported for"):
+            kimage.reconstruct_patches(patches, size=(5, 5), padding="same")
+        patches_3d = np.zeros((2, 4, 4, 4, 375), dtype="float32")
+        with self.assertRaisesRegex(ValueError, "only supported for"):
+            kimage.reconstruct_patches(
+                patches_3d, size=(5, 5, 5), padding="same"
+            )
+        # The symbolic path raises at graph-construction time too, so a
+        # functional model can't be built that only fails on first call.
+        with self.assertRaisesRegex(ValueError, "only supported for"):
+            kimage.reconstruct_patches(
+                KerasTensor([2, 4, 4, 75]), size=(5, 5), padding="same"
+            )
+
+    def test_reconstruct_patches_strides_overlap_not_implemented(self):
+        # Overlapping strides (strides != size) are rejected at the op level.
+        patches = np.zeros((1, 4, 4, 75), dtype="float32")
+        with self.assertRaisesRegex(NotImplementedError, "non-overlapping"):
+            kimage.reconstruct_patches(
+                patches,
+                size=(5, 5),
+                output_size=(20, 20),
+                strides=(2, 2),
+            )
+        patches_3d = np.zeros((1, 4, 4, 4, 375), dtype="float32")
+        with self.assertRaisesRegex(NotImplementedError, "non-overlapping"):
+            kimage.reconstruct_patches(
+                patches_3d,
+                size=(5, 5, 5),
+                output_size=(20, 20, 20),
+                strides=(2, 2, 2),
+            )
+
+    def test_reconstruct_patches_wrong_rank(self):
+        # Eager and symbolic wrong-rank inputs get a clear ValueError.
+        with self.assertRaisesRegex(ValueError, "unexpected rank"):
+            kimage.reconstruct_patches(
+                np.zeros((1, 2, 4, 4, 75), dtype="float32"),
+                size=(5, 5),
+                output_size=(20, 20),
+            )
+        with self.assertRaisesRegex(ValueError, "unexpected rank"):
+            kimage.reconstruct_patches(
+                np.zeros((4, 4, 375), dtype="float32"),
+                size=(5, 5, 5),
+                output_size=(20, 20, 20),
+            )
+        with self.assertRaisesRegex(ValueError, "unexpected rank"):
+            kimage.reconstruct_patches(
+                KerasTensor([1, 2, 4, 4, 75]),
+                size=(5, 5),
+                output_size=(20, 20),
+            )
+
+    def test_reconstruct_patches_op_class(self):
+        # Direct use of the Operation class (eager `call` + `get_config`).
+        op = kimage.ReconstructPatches(size=(5, 5), output_size=(20, 20))
+        patches = np.zeros((1, 4, 4, 75), dtype="float32")
+        out = op(patches)
+        self.assertEqual(tuple(out.shape), (1, 20, 20, 3))
+        config = op.get_config()
+        self.assertEqual(config["size"], (5, 5))
+        self.assertEqual(config["output_size"], (20, 20))
+        self.assertEqual(config["strides"], (5, 5))
+        self.assertEqual(config["padding"], "valid")
+
     def test_map_coordinates(self):
         input = KerasTensor([20, 20, 3])
         coordinates = KerasTensor([3, 15, 15, 3])
@@ -374,7 +887,7 @@ class ImageOpsStaticShapeTest(testing.TestCase):
         out = kimage.map_coordinates(
             image_uint8, coordinates, order=1, fill_mode="constant"
         )
-        assert out.shape == coordinates.shape[1:]
+        self.assertEqual(out.shape, coordinates.shape[1:])
 
     def test_map_coordinates_float32(self):
         image_float32 = tf.ones((1, 1, 3), dtype=tf.float32)
@@ -386,7 +899,7 @@ class ImageOpsStaticShapeTest(testing.TestCase):
         out = kimage.map_coordinates(
             image_float32, coordinates, order=1, fill_mode="constant"
         )
-        assert out.shape == coordinates.shape[1:]
+        self.assertEqual(out.shape, coordinates.shape[1:])
 
     def test_map_coordinates_nearest(self):
         image_uint8 = tf.ones((1, 1, 3), dtype=tf.uint8)
@@ -398,7 +911,7 @@ class ImageOpsStaticShapeTest(testing.TestCase):
         out = kimage.map_coordinates(
             image_uint8, coordinates, order=1, fill_mode="nearest"
         )
-        assert out.shape == coordinates.shape[1:]
+        self.assertEqual(out.shape, coordinates.shape[1:])
 
     def test_map_coordinates_manual_cast(self):
         image_uint8 = tf.ones((1, 1, 3), dtype=tf.uint8)
@@ -414,7 +927,7 @@ class ImageOpsStaticShapeTest(testing.TestCase):
             ),
             dtype=tf.uint8,
         )
-        assert out.shape == coordinates.shape[1:]
+        self.assertEqual(out.shape, coordinates.shape[1:])
 
     def test_pad_images(self):
         # Test channels_last
@@ -539,6 +1052,26 @@ class ImageOpsStaticShapeTest(testing.TestCase):
             method="linear",
         )
         self.assertEqual(out.shape, output_shape)
+
+    def test_ssim(self):
+        # Test unbatched channels_last
+        x1 = KerasTensor([32, 32, 3])
+        x2 = KerasTensor([32, 32, 3])
+        out = kimage.ssim(x1, x2, max_val=1.0)
+        self.assertEqual(out.shape, ())
+
+        # Test batched channels_last
+        x1 = KerasTensor([None, 32, 32, 3])
+        x2 = KerasTensor([None, 32, 32, 3])
+        out = kimage.ssim(x1, x2, max_val=1.0)
+        self.assertEqual(out.shape, (None,))
+
+        # Test channels_first
+        backend.set_image_data_format("channels_first")
+        x1 = KerasTensor([None, 3, 32, 32])
+        x2 = KerasTensor([None, 3, 32, 32])
+        out = kimage.ssim(x1, x2, max_val=1.0)
+        self.assertEqual(out.shape, (None,))
 
 
 AFFINE_TRANSFORM_INTERPOLATIONS = {  # map to order
@@ -1025,14 +1558,14 @@ def _compute_homography_matrix(start_points, end_points):
 
 class ImageOpsCorrectnessTest(testing.TestCase):
     def setUp(self):
+        super().setUp()
         # Defaults to channels_last
         self.data_format = backend.image_data_format()
         backend.set_image_data_format("channels_last")
-        return super().setUp()
 
     def tearDown(self):
+        super().tearDown()
         backend.set_image_data_format(self.data_format)
-        return super().tearDown()
 
     def test_rgb_to_grayscale(self):
         # Test channels_last
@@ -1040,13 +1573,13 @@ class ImageOpsCorrectnessTest(testing.TestCase):
         out = kimage.rgb_to_grayscale(x)
         ref_out = tf.image.rgb_to_grayscale(x)
         self.assertEqual(tuple(out.shape), tuple(ref_out.shape))
-        self.assertAllClose(ref_out, out)
+        self.assertAllClose(out, ref_out.numpy())
 
         x = np.random.random((2, 50, 50, 3)).astype("float32") * 255
         out = kimage.rgb_to_grayscale(x)
         ref_out = tf.image.rgb_to_grayscale(x)
         self.assertEqual(tuple(out.shape), tuple(ref_out.shape))
-        self.assertAllClose(ref_out, out)
+        self.assertAllClose(out, ref_out.numpy())
 
         # Test channels_first
         backend.set_image_data_format("channels_first")
@@ -1055,18 +1588,18 @@ class ImageOpsCorrectnessTest(testing.TestCase):
         ref_out = tf.image.rgb_to_grayscale(np.transpose(x, [1, 2, 0]))
         ref_out = tf.transpose(ref_out, [2, 0, 1])
         self.assertEqual(tuple(out.shape), tuple(ref_out.shape))
-        self.assertAllClose(ref_out, out)
+        self.assertAllClose(out, ref_out.numpy())
 
         x = np.random.random((2, 3, 50, 50)).astype("float32") * 255
         out = kimage.rgb_to_grayscale(x)
         ref_out = tf.image.rgb_to_grayscale(np.transpose(x, [0, 2, 3, 1]))
         ref_out = tf.transpose(ref_out, [0, 3, 1, 2])
         self.assertEqual(tuple(out.shape), tuple(ref_out.shape))
-        self.assertAllClose(ref_out, out)
+        self.assertAllClose(out, ref_out.numpy())
 
         # Test class
         out = kimage.RGBToGrayscale()(x)
-        self.assertAllClose(ref_out, out)
+        self.assertAllClose(out, ref_out.numpy())
 
     def test_rgb_to_hsv(self):
         # Test channels_last
@@ -1074,13 +1607,13 @@ class ImageOpsCorrectnessTest(testing.TestCase):
         out = kimage.rgb_to_hsv(x)
         ref_out = tf.image.rgb_to_hsv(x)
         self.assertEqual(tuple(out.shape), tuple(ref_out.shape))
-        self.assertAllClose(ref_out, out)
+        self.assertAllClose(out, ref_out.numpy())
 
         x = np.random.random((2, 50, 50, 3)).astype("float32")
         out = kimage.rgb_to_hsv(x)
         ref_out = tf.image.rgb_to_hsv(x)
         self.assertEqual(tuple(out.shape), tuple(ref_out.shape))
-        self.assertAllClose(ref_out, out)
+        self.assertAllClose(out, ref_out.numpy())
 
         # Test channels_first
         backend.set_image_data_format("channels_first")
@@ -1089,18 +1622,18 @@ class ImageOpsCorrectnessTest(testing.TestCase):
         ref_out = tf.image.rgb_to_hsv(np.transpose(x, [1, 2, 0]))
         ref_out = tf.transpose(ref_out, [2, 0, 1])
         self.assertEqual(tuple(out.shape), tuple(ref_out.shape))
-        self.assertAllClose(ref_out, out)
+        self.assertAllClose(out, ref_out.numpy())
 
         x = np.random.random((2, 3, 50, 50)).astype("float32")
         out = kimage.rgb_to_hsv(x)
         ref_out = tf.image.rgb_to_hsv(np.transpose(x, [0, 2, 3, 1]))
         ref_out = tf.transpose(ref_out, [0, 3, 1, 2])
         self.assertEqual(tuple(out.shape), tuple(ref_out.shape))
-        self.assertAllClose(ref_out, out)
+        self.assertAllClose(out, ref_out.numpy())
 
         # Test class
         out = kimage.RGBToHSV()(x)
-        self.assertAllClose(ref_out, out)
+        self.assertAllClose(out, ref_out.numpy())
 
     def test_hsv_to_rgb(self):
         # Test channels_last
@@ -1108,13 +1641,13 @@ class ImageOpsCorrectnessTest(testing.TestCase):
         out = kimage.hsv_to_rgb(x)
         ref_out = tf.image.hsv_to_rgb(x)
         self.assertEqual(tuple(out.shape), tuple(ref_out.shape))
-        self.assertAllClose(ref_out, out)
+        self.assertAllClose(out, ref_out.numpy())
 
         x = np.random.random((2, 50, 50, 3)).astype("float32")
         out = kimage.hsv_to_rgb(x)
         ref_out = tf.image.hsv_to_rgb(x)
         self.assertEqual(tuple(out.shape), tuple(ref_out.shape))
-        self.assertAllClose(ref_out, out)
+        self.assertAllClose(out, ref_out.numpy())
 
         # Test channels_first
         backend.set_image_data_format("channels_first")
@@ -1123,18 +1656,18 @@ class ImageOpsCorrectnessTest(testing.TestCase):
         ref_out = tf.image.hsv_to_rgb(np.transpose(x, [1, 2, 0]))
         ref_out = tf.transpose(ref_out, [2, 0, 1])
         self.assertEqual(tuple(out.shape), tuple(ref_out.shape))
-        self.assertAllClose(ref_out, out)
+        self.assertAllClose(out, ref_out.numpy())
 
         x = np.random.random((2, 3, 50, 50)).astype("float32")
         out = kimage.hsv_to_rgb(x)
         ref_out = tf.image.hsv_to_rgb(np.transpose(x, [0, 2, 3, 1]))
         ref_out = tf.transpose(ref_out, [0, 3, 1, 2])
         self.assertEqual(tuple(out.shape), tuple(ref_out.shape))
-        self.assertAllClose(ref_out, out)
+        self.assertAllClose(out, ref_out.numpy())
 
         # Test class
         out = kimage.HSVToRGB()(x)
-        self.assertAllClose(ref_out, out)
+        self.assertAllClose(out, ref_out.numpy())
 
     @parameterized.named_parameters(
         named_product(
@@ -1164,6 +1697,14 @@ class ImageOpsCorrectnessTest(testing.TestCase):
                     f"Received: interpolation={interpolation}, "
                     f"antialias={antialias}."
                 )
+        elif backend.backend() == "openvino":
+            if interpolation == "bicubic":
+                self.skipTest(
+                    "Resizing with Bicubic interpolation does not match "
+                    "TensorFlow strict numeric parity in the OpenVINO "
+                    "backend, so this parity test is skipped. "
+                    f"Received: interpolation={interpolation}."
+                )
         # Test channels_last
         x = np.random.random((30, 30, 3)).astype("float32") * 255
         out = kimage.resize(
@@ -1179,7 +1720,7 @@ class ImageOpsCorrectnessTest(testing.TestCase):
             antialias=antialias,
         )
         self.assertEqual(tuple(out.shape), tuple(ref_out.shape))
-        self.assertAllClose(ref_out, out, atol=1e-4)
+        self.assertAllClose(out, ref_out, atol=1e-4)
 
         x = np.random.random((2, 30, 30, 3)).astype("float32") * 255
         out = kimage.resize(
@@ -1195,7 +1736,7 @@ class ImageOpsCorrectnessTest(testing.TestCase):
             antialias=antialias,
         )
         self.assertEqual(tuple(out.shape), tuple(ref_out.shape))
-        self.assertAllClose(ref_out, out, atol=1e-4)
+        self.assertAllClose(out, ref_out, atol=1e-4)
 
         # Test channels_first
         backend.set_image_data_format("channels_first")
@@ -1214,7 +1755,7 @@ class ImageOpsCorrectnessTest(testing.TestCase):
         )
         ref_out = tf.transpose(ref_out, [2, 0, 1])
         self.assertEqual(tuple(out.shape), tuple(ref_out.shape))
-        self.assertAllClose(ref_out, out, atol=1e-4)
+        self.assertAllClose(out, ref_out, atol=1e-4)
 
         x = np.random.random((2, 3, 30, 30)).astype("float32") * 255
         out = kimage.resize(
@@ -1231,7 +1772,7 @@ class ImageOpsCorrectnessTest(testing.TestCase):
         )
         ref_out = tf.transpose(ref_out, [0, 3, 1, 2])
         self.assertEqual(tuple(out.shape), tuple(ref_out.shape))
-        self.assertAllClose(ref_out, out, atol=1e-4)
+        self.assertAllClose(out, ref_out, atol=1e-4)
 
         # Test class
         out = kimage.Resize(
@@ -1239,7 +1780,7 @@ class ImageOpsCorrectnessTest(testing.TestCase):
             interpolation=interpolation,
             antialias=antialias,
         )(x)
-        self.assertAllClose(ref_out, out, atol=1e-4)
+        self.assertAllClose(out, ref_out, atol=1e-4)
 
     def test_resize_uint8_round(self):
         x = np.array([0, 1, 254, 255], dtype="uint8").reshape(1, 2, 2, 1)
@@ -1398,6 +1939,38 @@ class ImageOpsCorrectnessTest(testing.TestCase):
             atol=1.0,
         )
 
+    def test_resize_pad_to_aspect_ratio_fill_value_correctness(self):
+        fill_value = 0.5
+        x = np.zeros((1, 10, 10, 3), dtype="float32")
+        out = kimage.resize(
+            x,
+            size=(10, 20),
+            pad_to_aspect_ratio=True,
+            fill_value=fill_value,
+        )
+        out_np = backend.ops.convert_to_numpy(out)
+        self.assertAllClose(
+            out_np[0, :, :5, :], np.ones((10, 5, 3)) * fill_value
+        )
+        self.assertAllClose(
+            out_np[0, :, 15:, :], np.ones((10, 5, 3)) * fill_value
+        )
+
+        x = np.zeros((1, 10, 10, 3), dtype="float32")
+        out = kimage.resize(
+            x,
+            size=(20, 10),
+            pad_to_aspect_ratio=True,
+            fill_value=fill_value,
+        )
+        out_np = backend.ops.convert_to_numpy(out)
+        self.assertAllClose(
+            out_np[0, :5, :, :], np.ones((5, 10, 3)) * fill_value
+        )
+        self.assertAllClose(
+            out_np[0, 15:, :, :], np.ones((5, 10, 3)) * fill_value
+        )
+
     @parameterized.named_parameters(
         ("zero_height", (0, 10)),
         ("zero_width", (10, 0)),
@@ -1432,6 +2005,15 @@ class ImageOpsCorrectnessTest(testing.TestCase):
                 "affine_transform with fill_mode=wrap is inconsistent with"
                 "scipy"
             )
+        if (
+            testing.jax_uses_tpu()
+            and interpolation == "bilinear"
+            and fill_mode == "constant"
+        ):
+            self.skipTest(
+                "JAX on TPU interpolation='bilinear' and fill_mode='constant' "
+                "Produces one incorrect pixel in the corner"
+            )
         # TODO: `nearest` interpolation in jax and torch causes random index
         # shifting, resulting in significant differences in output which leads
         # to failure
@@ -1458,7 +2040,7 @@ class ImageOpsCorrectnessTest(testing.TestCase):
             fill_mode=fill_mode,
         )
         self.assertEqual(tuple(out.shape), tuple(ref_out.shape))
-        self.assertAllClose(ref_out, out, atol=1e-2, tpu_atol=10, tpu_rtol=10)
+        self.assertAllClose(out, ref_out, atol=1e-2, tpu_atol=10, tpu_rtol=10)
 
         x = np.random.uniform(size=(2, 50, 50, 3)).astype("float32") * 255
         transform = np.random.uniform(size=(2, 6)).astype("float32")
@@ -1483,7 +2065,7 @@ class ImageOpsCorrectnessTest(testing.TestCase):
             axis=0,
         )
         self.assertEqual(tuple(out.shape), tuple(ref_out.shape))
-        self.assertAllClose(ref_out, out, atol=1e-2, tpu_atol=10, tpu_rtol=10)
+        self.assertAllClose(out, ref_out, atol=1e-2, tpu_atol=10, tpu_rtol=10)
 
         # Test channels_first
         backend.set_image_data_format("channels_first")
@@ -1504,7 +2086,7 @@ class ImageOpsCorrectnessTest(testing.TestCase):
         )
         ref_out = np.transpose(ref_out, [2, 0, 1])
         self.assertEqual(tuple(out.shape), tuple(ref_out.shape))
-        self.assertAllClose(ref_out, out, atol=1e-2, tpu_atol=1, tpu_rtol=1)
+        self.assertAllClose(out, ref_out, atol=1e-2, tpu_atol=1, tpu_rtol=1)
 
         x = np.random.uniform(size=(2, 3, 50, 50)).astype("float32") * 255
         transform = np.random.uniform(size=(2, 6)).astype("float32")
@@ -1532,13 +2114,13 @@ class ImageOpsCorrectnessTest(testing.TestCase):
         )
         ref_out = np.transpose(ref_out, [0, 3, 1, 2])
         self.assertEqual(tuple(out.shape), tuple(ref_out.shape))
-        self.assertAllClose(ref_out, out, atol=1e-2, tpu_atol=10, tpu_rtol=10)
+        self.assertAllClose(out, ref_out, atol=1e-2, tpu_atol=10, tpu_rtol=10)
 
         # Test class
         out = kimage.AffineTransform(
             interpolation=interpolation, fill_mode=fill_mode
         )(x, transform)
-        self.assertAllClose(ref_out, out, atol=1e-2, tpu_atol=10, tpu_rtol=10)
+        self.assertAllClose(out, ref_out, atol=1e-2, tpu_atol=10, tpu_rtol=10)
 
     @parameterized.named_parameters(
         named_product(
@@ -1554,13 +2136,6 @@ class ImageOpsCorrectnessTest(testing.TestCase):
             strides_h, strides_w = patch_h, patch_w
         else:
             strides_h, strides_w = strides[0], strides[1]
-        if (
-            backend.backend() == "tensorflow"
-            and strides_h > 1
-            or strides_w > 1
-            and dilation_rate > 1
-        ):
-            pytest.skip("dilation_rate>1 with strides>1 not supported with TF")
 
         # Test channels_last
         image = np.random.uniform(size=(1, 20, 20, 3)).astype("float32")
@@ -1579,7 +2154,7 @@ class ImageOpsCorrectnessTest(testing.TestCase):
             padding=padding.upper(),
         )
         self.assertEqual(tuple(patches_out.shape), tuple(patches_ref.shape))
-        self.assertAllClose(patches_ref, patches_out, atol=1e-2)
+        self.assertAllClose(patches_out, patches_ref, atol=1e-2)
 
         # Test channels_first
         if backend.backend() == "tensorflow":
@@ -1604,7 +2179,7 @@ class ImageOpsCorrectnessTest(testing.TestCase):
         )
         patches_ref = tf.transpose(patches_ref, [0, 3, 1, 2])
         self.assertEqual(tuple(patches_out.shape), tuple(patches_ref.shape))
-        self.assertAllClose(patches_ref, patches_out, atol=1e-2)
+        self.assertAllClose(patches_out, patches_ref, atol=1e-2)
 
         # Test class
         patches_out = kimage.ExtractPatches(
@@ -1613,7 +2188,7 @@ class ImageOpsCorrectnessTest(testing.TestCase):
             dilation_rate=dilation_rate,
             padding=padding,
         )(image)
-        self.assertAllClose(patches_ref, patches_out, atol=1e-2)
+        self.assertAllClose(patches_out, patches_ref, atol=1e-2)
 
     @parameterized.named_parameters(
         named_product(
@@ -1691,7 +2266,7 @@ class ImageOpsCorrectnessTest(testing.TestCase):
         self.assertEqual(
             tuple(padded_image.shape), tuple(ref_padded_image.shape)
         )
-        self.assertAllClose(ref_padded_image, padded_image)
+        self.assertAllClose(padded_image, ref_padded_image)
 
         # Test channels_first
         backend.set_image_data_format("channels_first")
@@ -1716,7 +2291,7 @@ class ImageOpsCorrectnessTest(testing.TestCase):
         self.assertEqual(
             tuple(padded_image.shape), tuple(ref_padded_image.shape)
         )
-        self.assertAllClose(ref_padded_image, padded_image)
+        self.assertAllClose(padded_image, ref_padded_image)
 
         # Test class
         padded_image = kimage.PadImages(
@@ -1727,7 +2302,7 @@ class ImageOpsCorrectnessTest(testing.TestCase):
             target_height,
             target_width,
         )(image)
-        self.assertAllClose(ref_padded_image, padded_image)
+        self.assertAllClose(padded_image, ref_padded_image)
 
     @parameterized.parameters(
         [
@@ -1773,7 +2348,7 @@ class ImageOpsCorrectnessTest(testing.TestCase):
         self.assertEqual(
             tuple(cropped_image.shape), tuple(ref_cropped_image.shape)
         )
-        self.assertAllClose(ref_cropped_image, cropped_image)
+        self.assertAllClose(cropped_image, ref_cropped_image)
 
         # Test channels_first
         backend.set_image_data_format("channels_first")
@@ -1798,7 +2373,7 @@ class ImageOpsCorrectnessTest(testing.TestCase):
         self.assertEqual(
             tuple(cropped_image.shape), tuple(ref_cropped_image.shape)
         )
-        self.assertAllClose(ref_cropped_image, cropped_image)
+        self.assertAllClose(cropped_image, ref_cropped_image)
 
         # Test class
         cropped_image = kimage.CropImages(
@@ -1809,7 +2384,7 @@ class ImageOpsCorrectnessTest(testing.TestCase):
             target_height,
             target_width,
         )(image)
-        self.assertAllClose(ref_cropped_image, cropped_image)
+        self.assertAllClose(cropped_image, ref_cropped_image)
 
     @parameterized.named_parameters(
         named_product(
@@ -1832,7 +2407,7 @@ class ImageOpsCorrectnessTest(testing.TestCase):
         )
 
         self.assertEqual(tuple(out.shape), tuple(ref_out.shape))
-        self.assertAllClose(ref_out, out, atol=1e-2, rtol=1e-2)
+        self.assertAllClose(out, ref_out, atol=1e-2, rtol=1e-2)
 
         # Test channels_first
         backend.set_image_data_format("channels_first")
@@ -1853,7 +2428,38 @@ class ImageOpsCorrectnessTest(testing.TestCase):
         )
 
         self.assertEqual(tuple(out.shape), tuple(ref_out.shape))
-        self.assertAllClose(ref_out, out, atol=1e-2, rtol=1e-2)
+        self.assertAllClose(out, ref_out, atol=1e-2, rtol=1e-2)
+
+    def test_perspective_transform_bfloat16_no_crash(self):
+        images = np.ones((10, 10, 3), dtype="bfloat16")
+        start_points = np.array(
+            [
+                [
+                    [0.95703125, 0.2080078125],
+                    [0.828125, 0.1494140625],
+                    [0.51171875, 0.1357421875],
+                    [0.6875, 0.83984375],
+                ]
+            ],
+            dtype="bfloat16",
+        )
+        end_points = np.array(
+            [
+                [
+                    [0.42578125, 0.95703125],
+                    [0.82421875, 0.337890625],
+                    [0.57421875, 0.75390625],
+                    [0.828125, 0.93359375],
+                ]
+            ],
+            dtype="bfloat16",
+        )
+
+        out = kimage.perspective_transform(
+            images, start_points, end_points, interpolation="bilinear"
+        )
+        self.assertEqual(tuple(out.shape), tuple(images.shape))
+        self.assertEqual(backend.standardize_dtype(out.dtype), "bfloat16")
 
     def test_gaussian_blur(self):
         # Test channels_last
@@ -1878,7 +2484,7 @@ class ImageOpsCorrectnessTest(testing.TestCase):
         )
 
         self.assertEqual(tuple(out.shape), tuple(ref_out.shape))
-        self.assertAllClose(ref_out, out, atol=1e-2, rtol=1e-2)
+        self.assertAllClose(out, ref_out, atol=1e-2, rtol=1e-2)
 
         # Test channels_first
         backend.set_image_data_format("channels_first")
@@ -1901,7 +2507,7 @@ class ImageOpsCorrectnessTest(testing.TestCase):
         )
 
         self.assertEqual(tuple(out.shape), tuple(ref_out.shape))
-        self.assertAllClose(ref_out, out, atol=1e-2, rtol=1e-2)
+        self.assertAllClose(out, ref_out, atol=1e-2, rtol=1e-2)
 
     def test_gaussian_blur_even_kernel_size(self):
         """Test gaussian_blur with even kernel sizes"""
@@ -1934,7 +2540,7 @@ class ImageOpsCorrectnessTest(testing.TestCase):
 
         self.assertEqual(tuple(out.shape), (32, 32, 3))
         self.assertEqual(tuple(out.shape), tuple(ref_out.shape))
-        self.assertAllClose(ref_out, out, atol=1e-2, rtol=1e-2)
+        self.assertAllClose(out, ref_out, atol=1e-2, rtol=1e-2)
 
         # Test channels_first with different even kernel sizes
         backend.set_image_data_format("channels_first")
@@ -1958,7 +2564,48 @@ class ImageOpsCorrectnessTest(testing.TestCase):
 
         self.assertEqual(tuple(out.shape), (3, 32, 32))
         self.assertEqual(tuple(out.shape), tuple(ref_out.shape))
-        self.assertAllClose(ref_out, out, atol=1e-2, rtol=1e-2)
+        self.assertAllClose(out, ref_out, atol=1e-2, rtol=1e-2)
+
+    def test_gaussian_blur_default_data_format(self):
+        # Omitting `data_format` must behave exactly like passing the
+        # configured `image_data_format` explicitly.
+        np.random.seed(42)
+        kernel_size = np.array([3, 3])
+        sigma = np.array([1.0, 2.0]).astype("float32")
+
+        # Test channels_last
+        backend.set_image_data_format("channels_last")
+        x = np.random.uniform(size=(20, 20, 3)).astype("float32")
+
+        out = kimage.gaussian_blur(x, kernel_size, sigma)
+        ref_out = gaussian_blur_np(
+            x,
+            kernel_size,
+            sigma,
+            data_format="channels_last",
+        )
+
+        self.assertEqual(tuple(out.shape), (20, 20, 3))
+        self.assertEqual(tuple(out.shape), tuple(ref_out.shape))
+        self.assertAllClose(out, ref_out, atol=1e-2, rtol=1e-2)
+
+        # Test channels_first
+        backend.set_image_data_format("channels_first")
+        x = np.random.uniform(size=(3, 20, 20)).astype("float32")
+
+        out = kimage.gaussian_blur(x, kernel_size, sigma)
+        ref_out = gaussian_blur_np(
+            x,
+            kernel_size,
+            sigma,
+            data_format="channels_first",
+        )
+
+        self.assertEqual(tuple(out.shape), (3, 20, 20))
+        self.assertEqual(tuple(out.shape), tuple(ref_out.shape))
+        self.assertAllClose(out, ref_out, atol=1e-2, rtol=1e-2)
+
+        backend.set_image_data_format("channels_last")
 
     def test_elastic_transform(self):
         # Test channels_last
@@ -1983,13 +2630,13 @@ class ImageOpsCorrectnessTest(testing.TestCase):
             data_format="channels_last",
         )
 
-        out = backend.convert_to_numpy(out)
+        out = backend.ops.convert_to_numpy(out)
 
         self.assertEqual(tuple(out.shape), tuple(ref_out.shape))
         self.assertAllClose(
-            np.mean(ref_out), np.mean(out), atol=1e-2, rtol=1e-2
+            np.mean(out), np.mean(ref_out), atol=1e-2, rtol=1e-2
         )
-        self.assertAllClose(np.var(ref_out), np.var(out), atol=1e-2, rtol=1e-2)
+        self.assertAllClose(np.var(out), np.var(ref_out), atol=1e-2, rtol=1e-2)
 
         # Test channels_first
         backend.set_image_data_format("channels_first")
@@ -2011,13 +2658,13 @@ class ImageOpsCorrectnessTest(testing.TestCase):
             seed=seed,
             data_format="channels_first",
         )
-        out = backend.convert_to_numpy(out)
+        out = backend.ops.convert_to_numpy(out)
 
         self.assertEqual(tuple(out.shape), tuple(ref_out.shape))
         self.assertAllClose(
-            np.mean(ref_out), np.mean(out), atol=1e-2, rtol=1e-2
+            np.mean(out), np.mean(ref_out), atol=1e-2, rtol=1e-2
         )
-        self.assertAllClose(np.var(ref_out), np.var(out), atol=1e-2, rtol=1e-2)
+        self.assertAllClose(np.var(out), np.var(ref_out), atol=1e-2, rtol=1e-2)
 
     def test_map_coordinates_constant_padding(self):
         input_img = tf.ones((2, 2), dtype=tf.uint8)
@@ -2030,7 +2677,7 @@ class ImageOpsCorrectnessTest(testing.TestCase):
             ),
             axis=0,
         )
-        out = backend.convert_to_numpy(
+        out = backend.ops.convert_to_numpy(
             kimage.map_coordinates(
                 input_img, grid, order=0, fill_mode="constant", fill_value=0
             )
@@ -2072,7 +2719,165 @@ class ImageOpsCorrectnessTest(testing.TestCase):
             antialias=antialias,
         )
         self.assertEqual(tuple(out.shape), tuple(ref_out.shape))
-        self.assertAllClose(ref_out, out, atol=1e-4)
+        self.assertAllClose(out, ref_out, atol=1e-4)
+
+    def test_reconstruct_patches(self):
+        # Eager extract -> reconstruct round-trips exactly, 2D.
+        for h, w, c, size, padding in [
+            (20, 20, 3, (5, 5), "valid"),
+            (32, 48, 1, (4, 8), "valid"),
+            (59, 55, 3, (8, 8), "same"),
+            (33, 41, 2, (5, 7), "same"),
+        ]:
+            x = _bf16_exact((2, h, w, c))
+            patches = kimage.extract_patches(x, size=size, padding=padding)
+            out = kimage.reconstruct_patches(
+                patches, size=size, output_size=(h, w), padding=padding
+            )
+            self.assertEqual(tuple(out.shape), x.shape)
+            self.assertAllClose(out, x, atol=1e-6)
+
+        # Unbatched round-trip.
+        x = _bf16_exact((16, 16, 3))
+        patches = kimage.extract_patches(x, size=(4, 4), padding="valid")
+        out = kimage.reconstruct_patches(
+            patches, size=(4, 4), output_size=(16, 16)
+        )
+        self.assertEqual(tuple(out.shape), x.shape)
+        self.assertAllClose(out, x, atol=1e-6)
+
+        # Valid padding with non-divisible dims reconstructs the covered
+        # (cropped) region: output_size is grid * size, not the original.
+        x = _bf16_exact((2, 10, 11, 3))
+        patches = kimage.extract_patches(x, size=(4, 4), padding="valid")
+        out = kimage.reconstruct_patches(
+            patches, size=(4, 4), output_size=(8, 8)
+        )
+        self.assertAllClose(out, x[:, :8, :8, :], atol=1e-6)
+
+    def test_reconstruct_patches_3d(self):
+        # Eager extract -> reconstruct round-trips exactly, 3D.
+        for d, h, w, c, size, padding in [
+            (20, 20, 20, 1, (5, 5, 5), "valid"),
+            (9, 12, 15, 2, (3, 4, 5), "valid"),
+            (11, 13, 15, 2, (4, 5, 6), "same"),
+        ]:
+            x = _bf16_exact((2, d, h, w, c))
+            patches = kimage.extract_patches_3d(x, size=size, padding=padding)
+            out = kimage.reconstruct_patches(
+                patches, size=size, output_size=(d, h, w), padding=padding
+            )
+            self.assertEqual(tuple(out.shape), x.shape)
+            self.assertAllClose(out, x, atol=1e-6)
+
+    def test_reconstruct_patches_channels_first(self):
+        # channels_first reconstruction equals the channels_last result
+        # after transposing. Patches are extracted in channels_last and
+        # transposed into channels_first layout, so the test runs on every
+        # backend regardless of NCHW conv support in extract_patches (the
+        # suite skips 2D channels_first extract_patches on tensorflow).
+        for h, w, c, size, padding in [
+            (20, 20, 3, (5, 5), "valid"),
+            (33, 41, 2, (5, 7), "same"),
+        ]:
+            x = _bf16_exact((2, h, w, c))
+            patches_cl = kimage.extract_patches(x, size=size, padding=padding)
+            patches_cf = knp.transpose(patches_cl, (0, 3, 1, 2))
+            recon_cf = kimage.reconstruct_patches(
+                patches_cf,
+                size=size,
+                output_size=(h, w),
+                padding=padding,
+                data_format="channels_first",
+            )
+            self.assertEqual(tuple(recon_cf.shape), (2, c, h, w))
+            self.assertAllClose(
+                recon_cf, np.transpose(x, (0, 3, 1, 2)), atol=1e-6
+            )
+
+        # Unbatched 2D exercises the rank-3 transpose branch.
+        x = _bf16_exact((8, 8, 2))
+        patches_cl = kimage.extract_patches(x, size=(4, 4), padding="valid")
+        patches_cf = knp.transpose(patches_cl, (2, 0, 1))
+        recon_cf = kimage.reconstruct_patches(
+            patches_cf,
+            size=(4, 4),
+            output_size=(8, 8),
+            data_format="channels_first",
+        )
+        self.assertEqual(tuple(recon_cf.shape), (2, 8, 8))
+        self.assertAllClose(recon_cf, np.transpose(x, (2, 0, 1)), atol=1e-6)
+
+    def test_reconstruct_patches_3d_channels_first(self):
+        # Batched 3D channels_first round-trip via transposed patches.
+        x = _bf16_exact((2, 6, 6, 6, 3))
+        patches_cl = kimage.extract_patches_3d(
+            x, size=(3, 3, 3), padding="valid"
+        )
+        patches_cf = knp.transpose(patches_cl, (0, 4, 1, 2, 3))
+        recon_cf = kimage.reconstruct_patches(
+            patches_cf,
+            size=(3, 3, 3),
+            output_size=(6, 6, 6),
+            padding="valid",
+            data_format="channels_first",
+        )
+        self.assertEqual(tuple(recon_cf.shape), (2, 3, 6, 6, 6))
+        self.assertAllClose(
+            recon_cf, np.transpose(x, (0, 4, 1, 2, 3)), atol=1e-6
+        )
+
+        # Unbatched 3D exercises the rank-4 transpose branch.
+        x = _bf16_exact((6, 6, 6, 2))
+        patches_cl = kimage.extract_patches_3d(
+            x, size=(3, 3, 3), padding="valid"
+        )
+        patches_cf = knp.transpose(patches_cl, (3, 0, 1, 2))
+        recon_cf = kimage.reconstruct_patches(
+            patches_cf,
+            size=(3, 3, 3),
+            output_size=(6, 6, 6),
+            data_format="channels_first",
+        )
+        self.assertEqual(tuple(recon_cf.shape), (2, 6, 6, 6))
+        self.assertAllClose(recon_cf, np.transpose(x, (3, 0, 1, 2)), atol=1e-6)
+
+    def test_reconstruct_patches_autoinfer(self):
+        # Omitting output_size reproduces the explicit result for valid.
+        x = _bf16_exact((2, 20, 20, 3))
+        patches = kimage.extract_patches(x, size=(5, 5), padding="valid")
+        out = kimage.reconstruct_patches(patches, size=(5, 5))
+        self.assertEqual(tuple(out.shape), x.shape)
+        self.assertAllClose(out, x, atol=1e-6)
+
+        # channels_first + auto-infer.
+        patches_cf = knp.transpose(patches, (0, 3, 1, 2))
+        out_cf = kimage.reconstruct_patches(
+            patches_cf, size=(5, 5), data_format="channels_first"
+        )
+        self.assertAllClose(out_cf, np.transpose(x, (0, 3, 1, 2)), atol=1e-6)
+
+        # 3D.
+        v = _bf16_exact((2, 9, 9, 9, 1))
+        patches_3d = kimage.extract_patches_3d(
+            v, size=(3, 3, 3), padding="valid"
+        )
+        out_3d = kimage.reconstruct_patches(patches_3d, size=(3, 3, 3))
+        self.assertEqual(tuple(out_3d.shape), v.shape)
+        self.assertAllClose(out_3d, v, atol=1e-6)
+
+    def test_reconstruct_patches_int_dtype(self):
+        # reconstruct_patches only reshapes/transposes/slices, so integer
+        # inputs survive exactly. Build the patches layout manually to stay
+        # independent of conv-based extract_patches dtype support.
+        x = np.arange(2 * 8 * 8 * 3, dtype="int32").reshape(2, 8, 8, 3)
+        patches = x.reshape(2, 2, 4, 2, 4, 3)
+        patches = patches.transpose(0, 1, 3, 2, 4, 5).reshape(2, 2, 2, 48)
+        out = kimage.reconstruct_patches(
+            patches, size=(4, 4), output_size=(8, 8)
+        )
+        self.assertEqual(backend.standardize_dtype(out.dtype), "int32")
+        self.assertAllClose(out, x)
 
 
 class ImageOpsDtypeTest(testing.TestCase):
@@ -2085,14 +2890,14 @@ class ImageOpsDtypeTest(testing.TestCase):
         INT_DTYPES = [x for x in INT_DTYPES if x not in ("uint16", "uint32")]
 
     def setUp(self):
+        super().setUp()
         # Defaults to channels_last
         self.data_format = backend.image_data_format()
         backend.set_image_data_format("channels_last")
-        return super().setUp()
 
     def tearDown(self):
+        super().tearDown()
         backend.set_image_data_format(self.data_format)
-        return super().tearDown()
 
     @parameterized.named_parameters(named_product(dtype=FLOAT_DTYPES))
     def test_affine_transform(self, dtype):
@@ -2258,14 +3063,14 @@ class ImageOpsDtypeTest(testing.TestCase):
 
 class ImageOpsBehaviorTests(testing.TestCase):
     def setUp(self):
+        super().setUp()
         # Defaults to channels_last
         self.data_format = backend.image_data_format()
         backend.set_image_data_format("channels_last")
-        return super().setUp()
 
     def tearDown(self):
+        super().tearDown()
         backend.set_image_data_format(self.data_format)
-        return super().tearDown()
 
     @parameterized.named_parameters(named_product(rank=[2, 5]))
     def test_rgb_to_grayscale_invalid_rank(self, rank):
@@ -2306,6 +3111,22 @@ class ImageOpsBehaviorTests(testing.TestCase):
         ):
             kimage.rgb_to_hsv(invalid_image)
 
+    def test_rgb_to_grayscale_invalid_channels(self):
+        error_msg = (
+            r"Invalid channel size: expected 3 \(RGB\) or 1 \(Grayscale\)\."
+        )
+        invalid_image = np.random.uniform(size=(4, 4, 4)).astype("float32")
+        with self.assertRaisesRegex(ValueError, error_msg):
+            kimage.rgb_to_grayscale(invalid_image)
+
+        invalid_image = KerasTensor(shape=(None, 4, 20, 20), dtype="float32")
+        with self.assertRaisesRegex(ValueError, error_msg):
+            kimage.rgb_to_grayscale(invalid_image, data_format="channels_first")
+        with self.assertRaisesRegex(ValueError, error_msg):
+            kimage.RGBToGrayscale(data_format="channels_first").symbolic_call(
+                invalid_image
+            )
+
     def test_rgb_to_hsv_invalid_dtype(self):
         invalid_image = np.random.uniform(size=(10, 10, 3)).astype("int32")
         with self.assertRaisesRegex(
@@ -2321,6 +3142,64 @@ class ImageOpsBehaviorTests(testing.TestCase):
             ValueError, "Invalid images dtype: expected float dtype."
         ):
             kimage.rgb_to_hsv(invalid_image)
+
+    def test_rgb_to_hsv_invalid_channels(self):
+        invalid_image = np.random.uniform(size=(4, 4, 3)).astype("float32")
+        with self.assertRaises(Exception):
+            kimage.rgb_to_hsv(invalid_image, data_format="channels_first")
+
+        invalid_image = KerasTensor(shape=(None, 4, 20, 20), dtype="float32")
+        with self.assertRaisesRegex(
+            ValueError,
+            "Input images must have 3 channels, but received images with "
+            "4 channels\\.",
+        ):
+            kimage.rgb_to_hsv(invalid_image, data_format="channels_first")
+        with self.assertRaisesRegex(
+            ValueError,
+            "Input images must have 3 channels, but received images with "
+            "4 channels\\.",
+        ):
+            kimage.RGBToHSV(data_format="channels_first").symbolic_call(
+                invalid_image
+            )
+
+        invalid_image = KerasTensor(shape=(4, 20, 20), dtype="float32")
+        with self.assertRaisesRegex(
+            ValueError,
+            "Input images must have 3 channels, but received images with "
+            "4 channels\\.",
+        ):
+            kimage.rgb_to_hsv(invalid_image, data_format="channels_first")
+
+    def test_hsv_to_rgb_invalid_channels(self):
+        invalid_image = np.random.uniform(size=(4, 4, 3)).astype("float32")
+        with self.assertRaises(Exception):
+            kimage.hsv_to_rgb(invalid_image, data_format="channels_first")
+
+        invalid_image = KerasTensor(shape=(None, 4, 20, 20), dtype="float32")
+        with self.assertRaisesRegex(
+            ValueError,
+            "Input images must have 3 channels, but received images with "
+            "4 channels\\.",
+        ):
+            kimage.hsv_to_rgb(invalid_image, data_format="channels_first")
+        with self.assertRaisesRegex(
+            ValueError,
+            "Input images must have 3 channels, but received images with "
+            "4 channels\\.",
+        ):
+            kimage.HSVToRGB(data_format="channels_first").symbolic_call(
+                invalid_image
+            )
+
+        invalid_image = KerasTensor(shape=(4, 20, 20), dtype="float32")
+        with self.assertRaisesRegex(
+            ValueError,
+            "Input images must have 3 channels, but received images with "
+            "4 channels\\.",
+        ):
+            kimage.hsv_to_rgb(invalid_image, data_format="channels_first")
 
     @parameterized.named_parameters(named_product(rank=[2, 5]))
     def test_hsv_to_rgb_invalid_rank(self, rank):
@@ -2499,6 +3378,160 @@ class ImageOpsBehaviorTests(testing.TestCase):
         ):
             kimage.crop_images(x, 2, 3, 4, 5)
 
+    def test_pad_images_negative_output_spec(self):
+        x = KerasTensor([10, 10, 3])
+        with self.assertRaisesRegex(ValueError, "top_padding must be >= 0"):
+            kimage.pad_images(
+                x,
+                None,
+                None,
+                1,
+                0,
+                target_height=3,
+                target_width=10,
+            )
+        with self.assertRaisesRegex(ValueError, "target_height must be >= 0"):
+            kimage.pad_images(
+                x,
+                top_padding=0,
+                left_padding=0,
+                bottom_padding=None,
+                right_padding=None,
+                target_height=-1,
+                target_width=10,
+            )
+
+        x = KerasTensor([None, None, 3])
+        with self.assertRaisesRegex(ValueError, "top_padding must be >= 0"):
+            kimage.pad_images(
+                x,
+                top_padding=-1,
+                left_padding=0,
+                bottom_padding=None,
+                right_padding=None,
+                target_height=5,
+                target_width=5,
+            )
+        with self.assertRaisesRegex(ValueError, "target_height must be >= 0"):
+            kimage.pad_images(
+                x,
+                top_padding=0,
+                left_padding=0,
+                bottom_padding=None,
+                right_padding=None,
+                target_height=-1,
+                target_width=5,
+            )
+
+    def test_pad_images_negative_arguments(self):
+        image = np.ones((10, 10, 3), dtype="float32")
+        with self.assertRaisesRegex(ValueError, "top_padding must be >= 0"):
+            kimage.pad_images(
+                image,
+                top_padding=-1,
+                left_padding=0,
+                bottom_padding=None,
+                right_padding=None,
+                target_height=12,
+                target_width=12,
+            )
+        with self.assertRaisesRegex(ValueError, "target_height must be >= 0"):
+            kimage.pad_images(
+                image,
+                top_padding=0,
+                left_padding=0,
+                bottom_padding=None,
+                right_padding=None,
+                target_height=-1,
+                target_width=12,
+            )
+        with self.assertRaisesRegex(ValueError, "target_width must be >= 0"):
+            kimage.PadImages(
+                top_padding=0,
+                left_padding=0,
+                bottom_padding=None,
+                right_padding=None,
+                target_height=12,
+                target_width=-1,
+            )(image)
+
+    def test_crop_images_negative_output_spec(self):
+        x = KerasTensor([10, 10, 3])
+        with self.assertRaisesRegex(ValueError, "top_cropping must be >= 0"):
+            kimage.crop_images(
+                x,
+                None,
+                None,
+                1,
+                0,
+                target_height=12,
+                target_width=10,
+            )
+        with self.assertRaisesRegex(ValueError, "target_height must be >= 0"):
+            kimage.crop_images(
+                x,
+                top_cropping=0,
+                left_cropping=0,
+                bottom_cropping=None,
+                right_cropping=None,
+                target_height=-1,
+                target_width=10,
+            )
+
+        x = KerasTensor([None, None, 3])
+        with self.assertRaisesRegex(ValueError, "top_cropping must be >= 0"):
+            kimage.crop_images(
+                x,
+                top_cropping=-1,
+                left_cropping=0,
+                bottom_cropping=None,
+                right_cropping=None,
+                target_height=5,
+                target_width=5,
+            )
+        with self.assertRaisesRegex(ValueError, "target_height must be >= 0"):
+            kimage.crop_images(
+                x,
+                top_cropping=0,
+                left_cropping=0,
+                bottom_cropping=None,
+                right_cropping=None,
+                target_height=-1,
+                target_width=5,
+            )
+
+    def test_crop_images_negative_arguments(self):
+        image = np.ones((10, 10, 3), dtype="float32")
+        with self.assertRaisesRegex(ValueError, "top_cropping must be >= 0"):
+            kimage.crop_images(
+                image,
+                top_cropping=-1,
+                left_cropping=0,
+                bottom_cropping=None,
+                right_cropping=None,
+                target_height=8,
+                target_width=8,
+            )
+        with self.assertRaisesRegex(ValueError, "target_height must be >= 0"):
+            kimage.crop_images(
+                image,
+                top_cropping=0,
+                left_cropping=0,
+                bottom_cropping=None,
+                right_cropping=None,
+                target_height=-1,
+                target_width=8,
+            )
+        with self.assertRaisesRegex(ValueError, "target_width must be >= 0"):
+            kimage.CropImages(
+                top_cropping=0,
+                left_cropping=0,
+                bottom_cropping=None,
+                right_cropping=None,
+                target_height=8,
+                target_width=-1,
+            )(image)
+
     def test_perspective_transform_invalid_images_rank(self):
         # Test rank=2
         invalid_image = np.random.uniform(size=(10, 10))
@@ -2658,8 +3691,14 @@ class ExtractPatches3DTest(testing.TestCase):
     FLOAT_DTYPES = [x for x in dtypes.FLOAT_TYPES if x not in ("float64",)]
 
     def setUp(self):
+        super().setUp()
+        # Defaults to channels_last
+        self.data_format = backend.image_data_format()
         backend.set_image_data_format("channels_last")
-        return super().setUp()
+
+    def tearDown(self):
+        super().tearDown()
+        backend.set_image_data_format(self.data_format)
 
     @parameterized.named_parameters(
         named_product(
@@ -2713,45 +3752,35 @@ class ExtractPatches3DTest(testing.TestCase):
         else:
             volume = np.random.rand(1, 2, 64, 64, 64).astype(dtype)
 
-        if backend.backend() == "tensorflow":
-            # TensorFlow backend does not support dilation > 1 and strides > 1
-            with self.assertRaises(ValueError):
-                kimage.extract_patches_3d(
-                    volume,
-                    size=(3, 3, 3),
-                    strides=(8, 8, 8),
-                    dilation_rate=(2, 2, 2),
-                    data_format=data_format,
-                )
-        else:
-            # Runs without error; check shape
-            patches = kimage.extract_patches_3d(
-                volume,
-                size=(3, 3, 3),
-                strides=(8, 8, 8),
-                dilation_rate=(2, 2, 2),
-                data_format=data_format,
+        # All backends (including TensorFlow) support dilation > 1 combined
+        # with strides > 1.
+        patches = kimage.extract_patches_3d(
+            volume,
+            size=(3, 3, 3),
+            strides=(8, 8, 8),
+            dilation_rate=(2, 2, 2),
+            data_format=data_format,
+        )
+        # eff_p = 3 + (3 - 1) * (2 - 1) = 5
+        # out = (64 - 5) // 8 + 1 = 8
+        expected_patches = 8
+        if data_format == "channels_last":
+            expected_shape = (
+                1,
+                expected_patches,
+                expected_patches,
+                expected_patches,
+                54,  # 2*3*3*3
             )
-            # eff_p = 3 + (3 - 1) * (2 - 1) = 5
-            # out = (64 - 5) // 8 + 1 = 8
-            expected_patches = 8
-            if data_format == "channels_last":
-                expected_shape = (
-                    1,
-                    expected_patches,
-                    expected_patches,
-                    expected_patches,
-                    54,  # 2*3*3*3
-                )
-            else:
-                expected_shape = (
-                    1,
-                    54,  # 2*3*3*3
-                    expected_patches,
-                    expected_patches,
-                    expected_patches,
-                )
-            self.assertEqual(patches.shape, expected_shape)
+        else:
+            expected_shape = (
+                1,
+                54,  # 2*3*3*3
+                expected_patches,
+                expected_patches,
+                expected_patches,
+            )
+        self.assertEqual(patches.shape, expected_shape)
 
     @parameterized.named_parameters(named_product(dtype=FLOAT_DTYPES))
     def test_extract_patches_3d_overlapping(self, dtype):
@@ -2802,7 +3831,7 @@ class ExtractPatches3DTest(testing.TestCase):
             volume, size=(2, 2, 2), strides=(2, 2, 2)
         )
         first_patch = patches[0, 0, 0, 0, :]
-        first_patch_np = backend.convert_to_numpy(first_patch)
+        first_patch_np = backend.ops.convert_to_numpy(first_patch)
 
         expected = volume[0, 0:2, 0:2, 0:2, 0].flatten()
         np.testing.assert_array_equal(first_patch_np, expected)
@@ -2835,3 +3864,118 @@ class ExtractPatches3DTest(testing.TestCase):
             volume, size=(2, 3, 4), strides=(2, 3, 4), data_format=data_format
         )
         self.assertEqual(patches.shape, expected_shape)
+
+    def test_ssim_identical_images(self):
+        # Identical images should have SSIM close to 1.0
+        x = np.random.random((32, 32, 3)).astype("float32")
+        out = kimage.ssim(x, x, max_val=1.0)
+        self.assertAllClose(out, 1.0, atol=1e-4)
+
+        # Batched case
+        x = np.random.random((2, 32, 32, 3)).astype("float32")
+        out = kimage.ssim(x, x, max_val=1.0)
+        self.assertEqual(out.shape, (2,))
+        self.assertAllClose(out, [1.0, 1.0], atol=1e-4)
+
+    def test_ssim_different_images(self):
+        # Different random images should have lower SSIM
+        np.random.seed(42)
+        x1 = np.random.random((32, 32, 3)).astype("float32")
+        x2 = np.random.random((32, 32, 3)).astype("float32")
+        out = kimage.ssim(x1, x2, max_val=1.0)
+        # SSIM of different images should be less than 1
+        self.assertTrue(float(out) < 0.5)
+
+    def test_ssim_vs_tensorflow(self):
+        # Compare with TensorFlow's implementation
+        np.random.seed(123)
+        x1 = np.random.random((2, 32, 32, 3)).astype("float32")
+        x2 = np.random.random((2, 32, 32, 3)).astype("float32")
+
+        out = kimage.ssim(x1, x2, max_val=1.0)
+        ref_out = tf.image.ssim(x1, x2, max_val=1.0)
+
+        self.assertEqual(out.shape, ref_out.shape)
+        self.assertAllClose(out, ref_out, atol=0.01)
+
+    def test_ssim_channels_first(self):
+        backend.set_image_data_format("channels_first")
+        # Identical images should have SSIM close to 1.0
+        x = np.random.random((3, 32, 32)).astype("float32")
+        out = kimage.ssim(x, x, max_val=1.0)
+        self.assertAllClose(out, 1.0, atol=1e-4)
+
+        # Batched case
+        x = np.random.random((2, 3, 32, 32)).astype("float32")
+        out = kimage.ssim(x, x, max_val=1.0)
+        self.assertEqual(out.shape, (2,))
+        self.assertAllClose(out, [1.0, 1.0], atol=1e-4)
+
+    def test_ssim_max_val_255(self):
+        # Test with max_val=255 for uint8-like images
+        x = (np.random.random((32, 32, 3)) * 255).astype("float32")
+        out = kimage.ssim(x, x, max_val=255.0)
+        self.assertAllClose(out, 1.0, atol=1e-4)
+
+    def test_ssim_custom_parameters(self):
+        # Test with custom filter_size and k values
+        x = np.random.random((32, 32, 3)).astype("float32")
+        out = kimage.ssim(
+            x, x, max_val=1.0, filter_size=7, filter_sigma=1.0, k1=0.02, k2=0.06
+        )
+        self.assertAllClose(out, 1.0, atol=1e-4)
+
+
+class SobelEdgesTest(testing.TestCase):
+    def test_sobel_edges_shape_channels_last(self):
+        image = np.random.random((2, 16, 16, 3)).astype("float32")
+        edges = kimage.sobel_edges(image, data_format="channels_last")
+        self.assertEqual(edges.shape, (2, 16, 16, 3, 2))
+
+    def test_sobel_edges_shape_channels_first(self):
+        image = np.random.random((2, 3, 16, 16)).astype("float32")
+        edges = kimage.sobel_edges(image, data_format="channels_first")
+        self.assertEqual(edges.shape, (2, 3, 16, 16, 2))
+
+    def test_sobel_edges_single_channel(self):
+        image = np.random.random((1, 16, 16, 1)).astype("float32")
+        edges = kimage.sobel_edges(image, data_format="channels_last")
+        self.assertEqual(edges.shape, (1, 16, 16, 1, 2))
+
+    def test_sobel_edges_detects_vertical_edge(self):
+        # Create image with vertical edge in the middle
+        image = np.zeros((1, 8, 8, 1), dtype="float32")
+        image[0, :, 4:, 0] = 1.0
+        edges = kimage.sobel_edges(image, data_format="channels_last")
+
+        # Horizontal gradient (dx) should be non-zero at the edge
+        dx = backend.ops.convert_to_numpy(edges[0, :, :, 0, 1])
+        # The edge is at column 4, so dx should have non-zero values there
+        self.assertTrue(np.any(np.abs(dx[:, 3:5]) > 0))
+
+    def test_sobel_edges_detects_horizontal_edge(self):
+        # Create image with horizontal edge in the middle
+        image = np.zeros((1, 8, 8, 1), dtype="float32")
+        image[0, 4:, :, 0] = 1.0
+        edges = kimage.sobel_edges(image, data_format="channels_last")
+
+        # Vertical gradient (dy) should be non-zero at the edge
+        dy = backend.ops.convert_to_numpy(edges[0, :, :, 0, 0])
+        # The edge is at row 4, so dy should have non-zero values there
+        self.assertTrue(np.any(np.abs(dy[3:5, :]) > 0))
+
+    def test_sobel_edges_uniform_image(self):
+        # Uniform image should have near-zero gradients (except at borders)
+        image = np.ones((1, 16, 16, 1), dtype="float32") * 0.5
+        edges = kimage.sobel_edges(image, data_format="channels_last")
+
+        # Interior gradients should be zero
+        edges_np = backend.ops.convert_to_numpy(edges)
+        interior = edges_np[0, 2:-2, 2:-2, 0, :]
+        self.assertAllClose(interior, np.zeros_like(interior), atol=1e-5)
+
+    def test_sobel_edges_multi_channel(self):
+        # Test with RGB image
+        image = np.random.random((1, 16, 16, 3)).astype("float32")
+        edges = kimage.sobel_edges(image, data_format="channels_last")
+        self.assertEqual(edges.shape, (1, 16, 16, 3, 2))

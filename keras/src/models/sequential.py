@@ -202,24 +202,41 @@ class Sequential(Model):
                 positional_args = [
                     param
                     for param in signature.parameters.values()
+                    if param.kind
+                    in (
+                        inspect.Parameter.POSITIONAL_ONLY,
+                        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                    )
+                ]
+                required_positional_args = [
+                    param
+                    for param in positional_args
                     if param.default == inspect.Parameter.empty
                 ]
-                if len(positional_args) != 1:
+                if not positional_args:
                     raise ValueError(
-                        "Layers added to a Sequential model "
-                        "can only have a single positional argument, "
-                        f"the input tensor. Layer {layer.__class__.__name__} "
-                        f"has multiple positional arguments: {positional_args}"
+                        "Layers added to a Sequential model should "
+                        "have a single positional argument, the "
+                        "input tensor. Layer "
+                        f"{layer.__class__.__name__} has no "
+                        "positional arguments."
+                    )
+                if len(required_positional_args) > 1:
+                    raise ValueError(
+                        "Layers added to a Sequential model can "
+                        "only have a single required positional "
+                        "argument, the input tensor. Layer "
+                        f"{layer.__class__.__name__} has multiple "
+                        "required positional arguments: "
+                        f"{required_positional_args}"
                     )
                 raise e
         outputs = x
         self._functional = Functional(inputs=inputs, outputs=outputs)
 
-    def call(self, inputs, training=None, mask=None, **kwargs):
+    def call(self, inputs, training=None, mask=None):
         if self._functional:
-            return self._functional.call(
-                inputs, training=training, mask=mask, **kwargs
-            )
+            return self._functional.call(inputs, training=training, mask=mask)
 
         # Fallback: Just apply the layer sequence.
         # This typically happens if `inputs` is a nested struct.
@@ -228,17 +245,10 @@ class Sequential(Model):
             # `outputs` are the outputs of `layer` applied to `inputs`. At the
             # end of each iteration `inputs` is set to `outputs` to prepare for
             # the next layer.
-            layer_kwargs = {
-                k: kwargs[k]
-                # only inject if this layer’s signature actually has that arg
-                for k in getattr(layer, "_call_has_context_arg", {})
-                if k in kwargs
-            }
             if layer._call_has_mask_arg:
-                layer_kwargs["mask"] = mask
-            if layer._call_has_training_arg and training is not None:
-                layer_kwargs["training"] = training
-            outputs = layer(inputs, **layer_kwargs)
+                outputs = layer(inputs, mask=mask)
+            else:
+                outputs = layer(inputs)
             inputs = outputs
 
             mask = tree.map_structure(backend.get_keras_mask, outputs)
@@ -356,8 +366,11 @@ class Sequential(Model):
             build_input_shape = config.get("build_input_shape")
             layer_configs = config["layers"]
         else:
-            name = None
-            layer_configs = config
+            raise ValueError(
+                "A Sequential model configuration must be "
+                "a dictionary containing the 'name' and "
+                f"'layers' keys. Received: config={config}"
+            )
         model = cls(name=name)
         for layer_config in layer_configs:
             if "module" not in layer_config:

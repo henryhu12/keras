@@ -1,11 +1,8 @@
-"""Unified high-level distribution APIs across backends.
-
-Currently only the JAX backend is supported. The TensorFlow backend
-will be supported in the future (via tf.dtensor API).
-"""
+"""Unified high-level distribution APIs across backends."""
 
 import collections
 import contextlib
+import math
 import os
 import re
 import warnings
@@ -27,28 +24,39 @@ def list_devices(device_type=None):
 
     Note: in a distributed setting, global devices are returned.
 
+    When `device_type` is not provided, devices of the default type are
+    returned. This function nevers return a mix of device types, for instance
+    GPUs and CPUs.
+
     Args:
-        device_type: string, one of `"cpu"`, `"gpu"` or `"tpu"`.
-            Defaults to `"gpu"` or `"tpu"` if available when
-            `device_type` is not provided. Otherwise
-            will return the `"cpu"` devices.
+        device_type: string, one of `"cpu"`, `"gpu"` or `"tpu"`. Defaults to
+            `"gpu"` or `"tpu"` if available when `device_type` is not provided.
+            Otherwise returns the `"cpu"` devices.
 
     Return:
-        List of devices that are available for distribute computation.
+        List of string, the devices that are available for distributed
+        computation. Each device is formatted as "device_type:id", for instance
+        "gpu:1" or "cpu:0".
+
     """
     return distribution_lib.list_devices(device_type)
 
 
 @keras_export("keras.distribution.get_device_count")
 def get_device_count(device_type=None):
-    """Returns the number of available JAX devices.
+    """Returns the number of available devices based on the device type.
+
+    When `device_type` is not provided, the count of devices of the default type
+    is returned. This function nevers counts a mix of device types, for instance
+    GPUs and CPUs.
+
     Args:
-        device_type: Optional device type to count (e.g., "cpu", "gpu", "tpu").
-            If `None`, it defaults to counting "gpu" or "tpu" devices if
-            available, otherwise it counts "cpu" devices. It does not
-            return the sum of all device types.
+        device_type: string, one of `"cpu"`, `"gpu"` or `"tpu"`. Defaults to
+            `"gpu"` or `"tpu"` if available when `device_type` is not provided.
+            Otherwise returns the `"cpu"` devices.
+
     Returns:
-        int: The total number of JAX devices for the specified type.
+        int: The total number of devices for the specified type.
     """
     return distribution_lib.get_device_count(device_type=device_type)
 
@@ -84,10 +92,10 @@ def initialize(job_addresses=None, num_processes=None, process_id=None):
             also configure this value via environment variable
             `KERAS_DISTRIBUTION_PROCESS_ID`.
 
-        Example:
-            Suppose there are two GPU processes, and process 0 is running at
-            address `10.0.0.1:1234`, and process 1 is running at address
-            `10.0.0.2:2345`. To configure such cluster, you can run
+    Example:
+        Suppose there are two GPU processes, and process 0 is running at
+        address `10.0.0.1:1234`, and process 1 is running at address
+        `10.0.0.2:2345`. To configure such cluster, you can run
 
         On process 0:
         ```python
@@ -147,13 +155,11 @@ def initialize(job_addresses=None, num_processes=None, process_id=None):
 class DeviceMesh:
     """A cluster of computation devices for distributed computation.
 
-    This API is aligned with `jax.sharding.Mesh` and `tf.dtensor.Mesh`, which
-    represents the computation devices in the global context.
+    This API is aligned with `jax.sharding.Mesh`, which represents the
+    computation devices in the global context.
 
     See more details in [jax.sharding.Mesh](
-        https://jax.readthedocs.io/en/latest/jax.sharding.html#jax.sharding.Mesh)
-    and [tf.dtensor.Mesh](
-        https://www.tensorflow.org/api_docs/python/tf/experimental/dtensor/Mesh).
+        https://jax.readthedocs.io/en/latest/jax.sharding.html#jax.sharding.Mesh).
 
     Args:
         shape: tuple of list of integers. The shape of the overall
@@ -188,7 +194,7 @@ class DeviceMesh:
         if devices is None:
             devices = list_devices()
         devices = np.array(devices)
-        if np.prod(shape) != np.prod(devices.shape):
+        if math.prod(shape) != math.prod(devices.shape):
             raise ValueError(
                 "Shape does not match the number of devices. "
                 f"Received: shape={shape}; devices.shape="
@@ -231,13 +237,10 @@ class DeviceMesh:
 class TensorLayout:
     """A layout to apply to a tensor.
 
-    This API is aligned with `jax.sharding.NamedSharding`
-    and `tf.dtensor.Layout`.
+    This API is aligned with `jax.sharding.NamedSharding`.
 
     See more details in [jax.sharding.NamedSharding](
-        https://jax.readthedocs.io/en/latest/jax.sharding.html#jax.sharding.NamedSharding)
-    and [tf.dtensor.Layout](
-        https://www.tensorflow.org/api_docs/python/tf/experimental/dtensor/Layout).
+        https://jax.readthedocs.io/en/latest/jax.sharding.html#jax.sharding.NamedSharding).
 
     Args:
         axes: tuple of strings that should map to the `axis_names` in
@@ -324,6 +327,42 @@ class Distribution:
         self._device_mesh = device_mesh
         self._batch_dim_name = batch_dim_name
         self._auto_shard_dataset = auto_shard_dataset
+        if (
+            distribution_lib is not None
+            and hasattr(distribution_lib, "num_processes")
+            and hasattr(distribution_lib, "process_id")
+        ):
+            self._num_processes = distribution_lib.num_processes()
+            self._process_id = distribution_lib.process_id()
+        else:
+            self._num_processes = 1
+            self._process_id = 0
+        self._is_multi_process = self._num_processes > 1
+
+    @property
+    def num_processes(self):
+        """Total number of processes in the cluster."""
+        return self._num_processes
+
+    @property
+    def num_model_replicas(self):
+        """Number of model replicas."""
+        raise NotImplementedError()
+
+    @property
+    def num_data_shards(self):
+        """Total number of data shards."""
+        return min(self.num_model_replicas, self.num_processes)
+
+    @property
+    def data_shard_id(self):
+        """ID of the data shard for the current process."""
+        num_model_replicas = self.num_model_replicas
+        if num_model_replicas >= self.num_processes:
+            return self._process_id
+        else:
+            processes_per_replica = self.num_processes // num_model_replicas
+            return self._process_id // processes_per_replica
 
     def get_data_layout(self, data_shape):
         """Retrieve the `TensorLayout` for the input data.
@@ -388,23 +427,6 @@ class Distribution:
     def auto_shard_dataset(self, auto_shard_dataset):
         self._auto_shard_dataset = auto_shard_dataset
 
-    def distribute_dataset(self, dataset):
-        """Create a distributed dataset from the original global dataset.
-
-        Args:
-            dataset: the original global dataset instance.
-
-        Returns:
-            If `auto_shard_dataset` is `True`, returns a sharded dataset that
-            only produces data for the current local worker/process.  Otherwise,
-            returns the original dataset.
-
-        Raises:
-            ValueError: if auto-sharding is requested in a multi-process
-            setting, but the dataset type is not supported.
-        """
-        raise NotImplementedError()
-
     def __repr__(self):
         return f"<{self.__class__.__name__} device_mesh={self.device_mesh}>"
 
@@ -447,10 +469,9 @@ class DataParallel(Distribution):
         else:
             self._initialize_mesh_from_list_devices(auto_shard_dataset)
 
-        # Those following attributes might get convert to public methods.
-        self._num_process = distribution_lib.num_processes()
-        self._process_id = distribution_lib.process_id()
-        self._is_multi_process = self._num_process > 1
+    @property
+    def num_model_replicas(self):
+        return self.device_mesh.devices.size
 
     def _initialize_with_device_mesh(self, device_mesh, auto_shard_dataset):
         if not isinstance(device_mesh, DeviceMesh):
@@ -507,45 +528,6 @@ class DataParallel(Distribution):
     def get_tensor_layout(self, path):
         # For data parallel training, the intermediate state is not changed.
         return None
-
-    def distribute_dataset(self, dataset):
-        if not self._is_multi_process or not self.auto_shard_dataset:
-            return dataset
-
-        # Try to distribute a global tf.data.Dataset.
-        from keras.src.utils.module_utils import tensorflow as tf
-
-        if not tf.available or not isinstance(dataset, tf.data.Dataset):
-            raise ValueError(
-                "Only `tf.data.Dataset` is supported for auto-sharding, "
-                f"got {type(dataset)}"
-            )
-
-        from tensorflow.python.data.experimental.ops import (
-            distribute as tf_data_distribute,
-        )
-
-        batch_size = tf_data_distribute.compute_batch_size(dataset)
-        if batch_size.numpy() < 0:
-            raise ValueError(
-                "The batch size of the input dataset is "
-                "unknown. Please config the batch size for "
-                "the input dataset, e.g via `dataset.batch(batch_size)`"
-            )
-        per_worker_batch_size = tf_data_distribute.batch_sizes_for_worker(
-            global_batch_size=batch_size,
-            num_workers=self._num_process,
-            num_replicas_per_worker=1,  # We hard code this for now.
-            worker_index=self._process_id,
-        )
-        distributed_dataset = dataset.rebatch(per_worker_batch_size)
-        distributed_dataset = tf_data_distribute._AutoShardDataset(
-            distributed_dataset,
-            num_workers=self._num_process,
-            index=self._process_id,
-            num_replicas=self._num_process,
-        )
-        return distributed_dataset.prefetch(tf.data.AUTOTUNE)
 
 
 @keras_export("keras.distribution.ModelParallel")
@@ -655,10 +637,24 @@ class ModelParallel(Distribution):
         super().__init__(device_mesh, batch_dim_name, auto_shard_dataset)
         self._layout_map = layout_map
 
-        # Those following attributes might get convert to public methods.
-        self._num_process = distribution_lib.num_processes()
-        self._process_id = distribution_lib.process_id()
-        self._is_multi_process = self._num_process > 1
+        if (
+            self._is_multi_process
+            and self.num_processes > self.num_model_replicas
+            and self.num_processes % self.num_model_replicas != 0
+        ):
+            raise ValueError(
+                "If `num_processes` is greater than `num_model_replicas`, "
+                "`num_processes` must be divisible by `num_model_replicas`. "
+                f"Got num_processes={self.num_processes}, "
+                f"num_model_replicas={self.num_model_replicas}."
+            )
+
+    @property
+    def num_model_replicas(self):
+        mesh_batch_dim_index = self.device_mesh.axis_names.index(
+            self.batch_dim_name
+        )
+        return self.device_mesh.shape[mesh_batch_dim_index]
 
     def get_data_layout(self, data_shape):
         data_shard_spec = [None] * len(data_shape)
@@ -678,82 +674,6 @@ class ModelParallel(Distribution):
 
     def get_tensor_layout(self, path):
         return self._layout_map[path]
-
-    def distribute_dataset(self, dataset):
-        if not self._is_multi_process or not self.auto_shard_dataset:
-            return dataset
-
-        # Try to distribute a global tf.data.Dataset.
-        from keras.src.utils.module_utils import tensorflow as tf
-
-        if not tf.available or not isinstance(dataset, tf.data.Dataset):
-            raise ValueError(
-                "Only `tf.data.Dataset` is supported for auto-sharding, "
-                f"got {type(dataset)}"
-            )
-
-        from tensorflow.python.data.experimental.ops import (
-            distribute as tf_data_distribute,
-        )
-
-        global_batch_size = tf_data_distribute.compute_batch_size(dataset)
-        if global_batch_size.numpy() < 0:
-            raise ValueError(
-                "The batch size of the input dataset is "
-                "unknown. Please config the batch size for "
-                "the input dataset, e.g via `dataset.batch(batch_size)`"
-            )
-
-        # We need to compute the per-process/worker/host batch size.
-        # This will depend on how many model replicas we have on each process.
-        # Note that this might be smaller than one if model replicas are sharded
-        # across multiple processes.
-        mesh_batch_dim_index = self.device_mesh.axis_names.index(
-            self.batch_dim_name
-        )
-        num_model_replicas = self.device_mesh.shape[mesh_batch_dim_index]
-        if num_model_replicas == 1:
-            # No sharding is needed in this case. Each process will have the
-            # global batch size, and data from the iterator will need to be
-            # replicated across all processes.
-            return dataset.prefetch(tf.data.AUTOTUNE)
-        num_model_replicas_per_process = num_model_replicas / self._num_process
-        if num_model_replicas_per_process >= 1:
-            # Each process will have one or more full model replicas. Data will
-            # be sharded across all processes without replication.
-            if global_batch_size % self._num_process != 0:
-                raise ValueError(
-                    "Global batch size must be divisible by the number of "
-                    f"processes. `global_batch_size`={global_batch_size} and "
-                    f"`num_process`={self._num_process}"
-                )
-            per_process_batch_size = global_batch_size // self._num_process
-            distributed_dataset = dataset.rebatch(per_process_batch_size)
-            distributed_dataset = distributed_dataset.shard(
-                num_shards=self._num_process,
-                index=self._process_id,
-            )
-            return distributed_dataset.prefetch(tf.data.AUTOTUNE)
-        else:
-            # Model replicas are sharded across multiple processes. Data will be
-            # sharded across model replicas, and replicated across processes
-            # within the same model replica.
-            if global_batch_size % num_model_replicas != 0:
-                raise ValueError(
-                    "Global batch size must be divisible by the number of "
-                    f"replicas. `global_batch_size`={global_batch_size} and "
-                    f"`num_model_replicas`={num_model_replicas}"
-                )
-            per_process_batch_size = global_batch_size // num_model_replicas
-            distributed_dataset = dataset.rebatch(per_process_batch_size)
-            processes_per_replica = self._num_process // num_model_replicas
-            # TODO: Figure out what the convention is for data sharding id.
-            data_shard_id = self._process_id % processes_per_replica
-            distributed_dataset = distributed_dataset.shard(
-                num_shards=num_model_replicas,
-                index=data_shard_id,
-            )
-            return distributed_dataset.prefetch(tf.data.AUTOTUNE)
 
 
 @keras_export("keras.distribution.LayoutMap")
@@ -911,3 +831,9 @@ def set_distribution(value):
         value: a `Distribution` instance.
     """
     global_state.set_global_attribute(GLOBAL_ATTRIBUTE_NAME, value)
+    if value is not None:
+        if hasattr(distribution_lib, "activate_dtensor_promotion"):
+            distribution_lib.activate_dtensor_promotion()
+    else:
+        if hasattr(distribution_lib, "deactivate_dtensor_promotion"):
+            distribution_lib.deactivate_dtensor_promotion()

@@ -11,6 +11,7 @@ from keras.src import models
 from keras.src import testing
 from keras.src.saving import saving_api
 from keras.src.testing.test_utils import named_product
+from keras.src.trainers.data_adapters.py_dataset_adapter import PyDataset
 
 
 class DiscretizationTest(testing.TestCase):
@@ -37,6 +38,52 @@ class DiscretizationTest(testing.TestCase):
         )
         output = layer(np.array([[0.0, 0.1, 0.3]]))
         self.assertTrue(output.dtype, "int32")
+        self.assertLen(layer.bin_boundaries, 3)
+
+    def test_adapt_with_generator(self):
+        def data_gen():
+            for _ in range(5):
+                yield np.random.uniform(0, 10, size=(20,))
+
+        layer = layers.Discretization(num_bins=4)
+        layer.adapt(data_gen())
+        self.assertLen(layer.bin_boundaries, 3)
+        output = layer(np.array([[1.0, 5.0, 9.0]]))
+        self.assertEqual(output.shape, (1, 3))
+
+    def test_adapt_with_infinite_generator_and_steps(self):
+        def data_gen():
+            while True:
+                yield np.random.uniform(0, 10, size=(20,))
+
+        layer = layers.Discretization(num_bins=4)
+        layer.adapt(data_gen(), steps=5)
+        self.assertLen(layer.bin_boundaries, 3)
+
+    def test_adapt_with_list_of_arrays(self):
+        batches = [
+            np.array([1.0, 2.0, 3.0]),
+            np.array([4.0, 5.0, 6.0]),
+        ]
+        layer = layers.Discretization(num_bins=3)
+        layer.adapt(batches)
+        self.assertLen(layer.bin_boundaries, 2)
+
+    def test_adapt_with_grain_dataset(self):
+        grain = pytest.importorskip("grain")
+        raw = np.random.uniform(0, 10, size=(100,)).astype("float32")
+
+        class Source(grain.sources.RandomAccessDataSource):
+            def __getitem__(self, idx):
+                return raw[idx : idx + 10]
+
+            def __len__(self):
+                return 10
+
+        dataset = grain.MapDataset.source(Source()).batch(batch_size=5)
+        layer = layers.Discretization(num_bins=4)
+        layer.adapt(dataset)
+        self.assertLen(layer.bin_boundaries, 3)
 
     @parameterized.named_parameters(
         named_product(
@@ -106,7 +153,7 @@ class DiscretizationTest(testing.TestCase):
         )
         output = layer(input_array)
         self.assertSparse(output, sparse)
-        self.assertTrue(backend.is_tensor(output))
+        self.assertTrue(backend.ops.is_tensor(output))
         self.assertAllClose(output, expected_output)
 
     def test_tf_data_compatibility(self):
@@ -474,3 +521,26 @@ class DiscretizationTest(testing.TestCase):
             expected_shape,
             f"Failed for num_bins={num_bins}, mode={output_mode}",
         )
+
+    @parameterized.parameters([("x",), ("x_and_y",), ("x_y_and_weights",)])
+    def test_adapt_pydataset_compat(self, pydataset_type):
+        class CustomDataset(PyDataset):
+            def __len__(self):
+                return 5
+
+            def __getitem__(self, idx):
+                x = np.random.uniform(0, 10, size=(20,))
+                y = np.random.randint(0, 2, size=(20,))
+                weights = np.ones((20,))
+                if pydataset_type == "x":
+                    return x
+                elif pydataset_type == "x_and_y":
+                    return x, y
+                elif pydataset_type == "x_y_and_weights":
+                    return x, y, weights
+                else:
+                    raise NotImplementedError(pydataset_type)
+
+        layer = layers.Discretization(num_bins=4)
+        layer.adapt(CustomDataset())
+        self.assertLen(layer.bin_boundaries, 3)

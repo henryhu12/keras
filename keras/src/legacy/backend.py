@@ -1,6 +1,7 @@
 """Legacy Keras 1/2 backend functions."""
 
 import itertools
+import math
 
 import numpy as np
 
@@ -634,7 +635,7 @@ def cos(x):
 @keras_export("keras._legacy.backend.count_params")
 def count_params(x):
     """DEPRECATED."""
-    return np.prod(x.shape.as_list())
+    return math.prod(x.shape.as_list())
 
 
 @keras_export("keras._legacy.backend.ctc_batch_cost")
@@ -1296,7 +1297,10 @@ def relu(x, alpha=0.0, max_value=None, threshold=0.0):
 @keras_export("keras._legacy.backend.repeat")
 def repeat(x, n):
     """DEPRECATED."""
-    assert ndim(x) == 2
+    if ndim(x) != 2:
+        raise ValueError(
+            f"Expected input `x` to have rank 2. Received: rank(x)={ndim(x)}"
+        )
     x = tf.expand_dims(x, 1)
     pattern = tf.stack([1, n, 1])
     return tf.tile(x, pattern)
@@ -2008,9 +2012,11 @@ def sparse_categorical_crossentropy(
 @keras_export("keras._legacy.backend.spatial_2d_padding")
 def spatial_2d_padding(x, padding=((1, 1), (1, 1)), data_format=None):
     """DEPRECATED."""
-    assert len(padding) == 2
-    assert len(padding[0]) == 2
-    assert len(padding[1]) == 2
+    if len(padding) != 2 or len(padding[0]) != 2 or len(padding[1]) != 2:
+        raise ValueError(
+            "Expected `padding` to be a tuple of 2 tuples of 2 integers. "
+            f"Received: padding={padding}"
+        )
     if data_format is None:
         data_format = backend.image_data_format()
     if data_format not in {"channels_first", "channels_last"}:
@@ -2026,10 +2032,16 @@ def spatial_2d_padding(x, padding=((1, 1), (1, 1)), data_format=None):
 @keras_export("keras._legacy.backend.spatial_3d_padding")
 def spatial_3d_padding(x, padding=((1, 1), (1, 1), (1, 1)), data_format=None):
     """DEPRECATED."""
-    assert len(padding) == 3
-    assert len(padding[0]) == 2
-    assert len(padding[1]) == 2
-    assert len(padding[2]) == 2
+    if (
+        len(padding) != 3
+        or len(padding[0]) != 2
+        or len(padding[1]) != 2
+        or len(padding[2]) != 2
+    ):
+        raise ValueError(
+            "Expected `padding` to be a tuple of 3 tuples of 2 integers. "
+            f"Received: padding={padding}"
+        )
     if data_format is None:
         data_format = backend.image_data_format()
     if data_format not in {"channels_first", "channels_last"}:
@@ -2165,7 +2177,11 @@ def tanh(x):
 @keras_export("keras._legacy.backend.temporal_padding")
 def temporal_padding(x, padding=(1, 1)):
     """DEPRECATED."""
-    assert len(padding) == 2
+    if len(padding) != 2:
+        raise ValueError(
+            "Expected `padding` to be a tuple of 2 integers. "
+            f"Received: padding={padding}"
+        )
     pattern = [[0, 0], [padding[0], padding[1]], [0, 0]]
     return tf.compat.v1.pad(x, pattern)
 

@@ -22,6 +22,10 @@ _NNX_ENABLED = False
 _MAX_EPOCHS = None
 _MAX_STEPS_PER_EPOCH = None
 
+# This flag forces Keras to use backend-agnostic ops even if there is
+# backend-specific implementation available.
+_USE_BACKEND_AGNOSTIC_OPS = False
+
 
 @keras_export(["keras.config.floatx", "keras.backend.floatx"])
 def floatx():
@@ -297,12 +301,27 @@ if os.path.exists(_config_path):
     except ValueError:
         _config = {}
     _floatx = _config.get("floatx", floatx())
-    assert _floatx in {"float16", "float32", "float64"}
+    if _floatx not in {"float16", "float32", "float64"}:
+        raise ValueError(
+            "Invalid `floatx` configuration. "
+            "Expected one of {'float16', 'float32', 'float64'}. "
+            f"Received: floatx={_floatx}"
+        )
     _epsilon = _config.get("epsilon", epsilon())
-    assert isinstance(_epsilon, float)
+    if not isinstance(_epsilon, float):
+        raise ValueError(
+            "Invalid `epsilon` configuration. "
+            "Expected a float. "
+            f"Received: epsilon={_epsilon}"
+        )
     _backend = _config.get("backend", _BACKEND)
     _image_data_format = _config.get("image_data_format", image_data_format())
-    assert _image_data_format in {"channels_last", "channels_first"}
+    if _image_data_format not in {"channels_last", "channels_first"}:
+        raise ValueError(
+            "Invalid `image_data_format` configuration. "
+            "Expected one of {'channels_last', 'channels_first'}. "
+            f"Received: image_data_format={_image_data_format}"
+        )
     _nnx_enabled_config = _config.get("nnx_enabled", _NNX_ENABLED)
 
     # Apply basic configs that don't cause circular import
@@ -401,8 +420,8 @@ def set_max_steps_per_epoch(max_steps_per_epoch):
     a scrip without modifying its source.
 
     Args:
-        max_epochs: The integer limit on the number of epochs or `None`. If
-            `None`, no limit is applied.
+        max_steps_per_epoch: The integer limit on the number of steps per
+            epoch or `None`. If `None`, no limit is applied.
     """
     global _MAX_STEPS_PER_EPOCH
     _MAX_STEPS_PER_EPOCH = max_steps_per_epoch
@@ -427,13 +446,13 @@ def max_epochs():
 def max_steps_per_epoch():
     """Get the maximum number of steps for any call to fit/evaluate/predict.
 
-    Retrieves the limit on the number of epochs set by
+    Retrieves the limit on the number of steps per epoch set by
     `keras.config.set_max_steps_per_epoch` or the `KERAS_MAX_STEPS_PER_EPOCH`
     environment variable.
 
-    Args:
-        max_epochs: The integer limit on the number of epochs or `None`. If
-            `None`, no limit is applied.
+    Returns:
+        The integer limit on the number of steps per epoch or `None`, if no
+        limit has been set.
     """
     return _MAX_STEPS_PER_EPOCH
 
@@ -446,3 +465,18 @@ if "KERAS_NNX_ENABLED" in os.environ:
         _NNX_ENABLED = False
 
 set_nnx_enabled(_NNX_ENABLED)
+
+if "KERAS_USE_BACKEND_AGNOSTIC_OPS" in os.environ:
+    env_val = os.environ["KERAS_USE_BACKEND_AGNOSTIC_OPS"].lower()
+    _USE_BACKEND_AGNOSTIC_OPS = env_val in ("true", "1", "yes")
+
+
+def _use_backend_agnostic_ops():
+    """Returns the flag that checks if backend-agnostic ops are forced."""
+    return _USE_BACKEND_AGNOSTIC_OPS
+
+
+def _set_use_backend_agnostic_ops(value):
+    """Internal helper to force backend-agnostic ops for testing/benchmarks."""
+    global _USE_BACKEND_AGNOSTIC_OPS
+    _USE_BACKEND_AGNOSTIC_OPS = bool(value)

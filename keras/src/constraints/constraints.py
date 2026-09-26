@@ -107,7 +107,7 @@ class MaxNorm(Constraint):
         self.axis = axis
 
     def __call__(self, w):
-        w = backend.convert_to_tensor(w)
+        w = backend.ops.convert_to_tensor(w)
         norms = ops.sqrt(ops.sum(ops.square(w), axis=self.axis, keepdims=True))
         desired = ops.clip(norms, 0, self.max_value)
         return ops.cast(w, norms.dtype) * (
@@ -123,8 +123,8 @@ class NonNeg(Constraint):
     """Constrains the weights to be non-negative."""
 
     def __call__(self, w):
-        w = backend.convert_to_tensor(w)
-        return ops.multiply(w, ops.greater_equal(w, 0.0))
+        w = backend.ops.convert_to_tensor(w)
+        return ops.maximum(w, 0)
 
 
 @keras_export(["keras.constraints.UnitNorm", "keras.constraints.unit_norm"])
@@ -149,7 +149,7 @@ class UnitNorm(Constraint):
         self.axis = axis
 
     def __call__(self, w):
-        w = backend.convert_to_tensor(w)
+        w = backend.ops.convert_to_tensor(w)
         norms = ops.sqrt(ops.sum(ops.square(w), axis=self.axis, keepdims=True))
         return ops.cast(w, norms.dtype) / (backend.epsilon() + norms)
 
@@ -196,7 +196,7 @@ class MinMaxNorm(Constraint):
         self.axis = axis
 
     def __call__(self, w):
-        w = backend.convert_to_tensor(w)
+        w = backend.ops.convert_to_tensor(w)
         norms = ops.sqrt(ops.sum(ops.square(w), axis=self.axis, keepdims=True))
         desired = (
             self.rate * ops.clip(norms, self.min_value, self.max_value)

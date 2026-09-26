@@ -162,6 +162,19 @@ class BaseConvTranspose(Layer):
                 f"dilation_rate={self.dilation_rate}"
             )
 
+        if self.output_padding is not None:
+            for i, (op, s) in enumerate(zip(self.output_padding, self.strides)):
+                if op >= s:
+                    raise ValueError(
+                        "Invalid `output_padding` argument. "
+                        "Each value in `output_padding` must be strictly "
+                        "less than the corresponding `strides` value.\n"
+                        f"At index {i}, `output_padding` is {op} and `strides` "
+                        f"is {s}.\n"
+                        f"Received: output_padding={self.output_padding}, "
+                        f"strides={self.strides}."
+                    )
+
     def build(self, input_shape):
         if self.data_format == "channels_last":
             channel_axis = -1
@@ -242,6 +255,7 @@ class BaseConvTranspose(Layer):
                 "kernel_size": self.kernel_size,
                 "strides": self.strides,
                 "padding": self.padding,
+                "output_padding": self.output_padding,
                 "data_format": self.data_format,
                 "dilation_rate": self.dilation_rate,
                 "activation": activations.serialize(self.activation),

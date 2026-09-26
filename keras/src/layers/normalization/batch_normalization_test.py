@@ -8,12 +8,12 @@ from keras.src import layers
 from keras.src import ops
 from keras.src import random
 from keras.src import testing
+from keras.src import utils
 from keras.src.losses import MeanSquaredError
 from keras.src.models import Model
 
 
 class BatchNormalizationTest(testing.TestCase):
-    @pytest.mark.requires_trainable_backend
     def test_bn_basics(self):
         # vector case
         self.run_layer_test(
@@ -94,21 +94,33 @@ class BatchNormalizationTest(testing.TestCase):
         # Assert the normalization is correct.
         broadcast_shape = [1] * len(input_shape)
         broadcast_shape[axis] = input_shape[axis]
-        out = backend.convert_to_numpy(out)
+        out = backend.ops.convert_to_numpy(out)
         out = out - np.reshape(
-            backend.convert_to_numpy(layer.beta), broadcast_shape
+            backend.ops.convert_to_numpy(layer.beta), broadcast_shape
         )
         out = out / np.reshape(
-            backend.convert_to_numpy(layer.gamma), broadcast_shape
+            backend.ops.convert_to_numpy(layer.gamma), broadcast_shape
         )
 
         reduction_axes = list(range(len(input_shape)))
         del reduction_axes[axis]
         reduction_axes = tuple(reduction_axes)
-        self.assertAllClose(np.mean(out, axis=reduction_axes), 0.0, atol=1e-3)
-        self.assertAllClose(np.std(out, axis=reduction_axes), 1.0, atol=1e-3)
-        self.assertAllClose(layer.moving_mean, 0.0, atol=1e-3)
-        self.assertAllClose(layer.moving_variance, 1.0, atol=1e-3)
+        self.assertAllClose(
+            np.mean(out, axis=reduction_axes),
+            np.zeros((input_shape[axis],)),
+            atol=1e-3,
+        )
+        self.assertAllClose(
+            np.std(out, axis=reduction_axes),
+            np.ones((input_shape[axis],)),
+            atol=1e-3,
+        )
+        self.assertAllClose(
+            layer.moving_mean, np.zeros((input_shape[axis],)), atol=1e-3
+        )
+        self.assertAllClose(
+            layer.moving_variance, np.ones((input_shape[axis],)), atol=1e-3
+        )
 
         # Inference done before training shouldn't match.
         inference_out = layer(x, training=False)
@@ -202,16 +214,20 @@ class BatchNormalizationTest(testing.TestCase):
         for _ in range(10):
             out = layer(x, training=True)
 
-        out = backend.convert_to_numpy(out)
+        out = backend.ops.convert_to_numpy(out)
         out = out - np.reshape(
-            backend.convert_to_numpy(layer.beta), (1, 1, 1, 3)
+            backend.ops.convert_to_numpy(layer.beta), (1, 1, 1, 3)
         )
         out = out / np.reshape(
-            backend.convert_to_numpy(layer.gamma), (1, 1, 1, 3)
+            backend.ops.convert_to_numpy(layer.gamma), (1, 1, 1, 3)
         )
 
-        self.assertAllClose(np.mean(out, axis=(0, 1, 2)), 0.0, atol=1e-3)
-        self.assertAllClose(np.std(out, axis=(0, 1, 2)), 1.0, atol=1e-3)
+        self.assertAllClose(
+            np.mean(out, axis=(0, 1, 2)), np.zeros((3,)), atol=1e-3
+        )
+        self.assertAllClose(
+            np.std(out, axis=(0, 1, 2)), np.ones((3,)), atol=1e-3
+        )
 
     def test_large_value_within_autocast_scope(self):
         layer = layers.BatchNormalization()
@@ -240,7 +256,6 @@ class BatchNormalizationTest(testing.TestCase):
         self.assertAllClose(layer.moving_mean, ops.ones((4,)), atol=1e-6)
         self.assertAllClose(layer.moving_variance, ops.zeros((4,)), atol=1e-6)
 
-    @pytest.mark.requires_trainable_backend
     def test_renorm_basics(self):
         # Test basic renorm functionality
         self.run_layer_test(
@@ -326,8 +341,9 @@ class BatchNormalizationTest(testing.TestCase):
 
         self.assertAllClose(out, out_renorm, atol=1e-5, rtol=1e-5)
 
-    @pytest.mark.requires_trainable_backend
     def test_renorm_correctness(self):
+        utils.set_random_seed(1337)
+
         epsilon = 1e-3
         momentum = 0.9
         renorm_momentum = 0.8
@@ -371,13 +387,14 @@ class BatchNormalizationTest(testing.TestCase):
         batch_mean = np.mean(x, axis=0)
         batch_var = np.var(x, axis=0)
         batch_stddev = np.sqrt(batch_var + epsilon)
-        x_norm = (x - batch_mean) / batch_stddev
 
         # Compute r, d, and then expected output.
         r = batch_stddev / init_renorm_stddev
         d = (batch_mean - init_renorm_mean) / init_renorm_stddev
 
-        expected_output = (x_norm * r + d) * init_gamma + init_beta
+        expected_output = (
+            ((x - batch_mean) / batch_stddev) * r + d
+        ) * init_gamma + init_beta
         actual_output = layer(x, training=True)
         self.assertAllClose(actual_output, expected_output, atol=1e-5)
 

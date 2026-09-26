@@ -1,3 +1,4 @@
+import itertools
 import math
 
 import numpy as np
@@ -8,6 +9,14 @@ from keras.src.api_export import keras_export
 from keras.src.layers.preprocessing.data_layer import DataLayer
 from keras.src.trainers.data_adapters.py_dataset_adapter import PyDataset
 from keras.src.utils.module_utils import tensorflow as tf
+from keras.src.utils.progbar import Progbar
+
+
+def _extract_batch(batch):
+    """Return input from batch; handle (x, y) or (x, y, sample_weight)."""
+    if isinstance(batch, (tuple, list)):
+        return batch[0]
+    return batch
 
 
 @keras_export("keras.layers.Normalization")
@@ -254,32 +263,73 @@ class Normalization(DataLayer):
         data, simply pass `axis=None` to the layer.
 
         Arg:
-            data: The data to train on. It can be passed either as a
-                `tf.data.Dataset`, as a NumPy array, or as a backend-native
-                eager tensor.
-                If a dataset, *it must be batched*. Keras will assume that the
-                data is batched, and if that assumption doesn't hold, the mean
-                and variance may be incorrectly computed.
+            data: The data to train on. It can be passed as a NumPy array, a
+                backend-native eager tensor, a `tf.data.Dataset`, a
+                `keras.utils.PyDataset`, or an iterable of batches (e.g. a
+                list of arrays or a generator yielding batches). If a dataset
+                or iterable, *it must be batched*. Keras will assume that each
+                element is a batch, and if that assumption doesn't hold, the
+                mean and variance may be incorrectly computed.
         """
-        if isinstance(data, np.ndarray) or backend.is_tensor(data):
+        data_is_iterable = False
+        if isinstance(data, np.ndarray) or backend.ops.is_tensor(data):
             input_shape = data.shape
         elif isinstance(data, tf.data.Dataset):
-            input_shape = tuple(data.element_spec.shape)
+
+            def get_input_shape(d):
+                element_spec = d.element_spec
+                x_spec = (
+                    element_spec[0]
+                    if isinstance(element_spec, tuple)
+                    else element_spec
+                )
+                return tuple(x_spec.shape)
+
+            input_shape = get_input_shape(data)
             if len(input_shape) == 1:
-                # Batch dataset if it isn't batched
                 data = data.batch(128)
-            input_shape = tuple(data.element_spec.shape)
+                input_shape = get_input_shape(data)
         elif isinstance(data, PyDataset):
-            data = data[0]
-            if isinstance(data, tuple):
-                # handling (x, y) or (x, y, sample_weight)
-                data = data[0]
-            input_shape = data.shape
+            if len(data) == 0:
+                raise ValueError(
+                    "adapt() received an empty PyDataset. "
+                    "Expected at least one batch."
+                )
+            first_batch = _extract_batch(data[0])
+            if not hasattr(first_batch, "shape"):
+                first_batch = backend.ops.convert_to_tensor(first_batch)
+            input_shape = tuple(first_batch.shape)
+        elif hasattr(data, "__iter__"):
+            data_is_iterable = True
+            # Consume first batch to infer input_shape; then chain it back for
+            # accumulation so we iterate over (first_batch, *rest).
+            data_iter = iter(data)
+            first_batch = next(data_iter, None)
+            if first_batch is None:
+                raise ValueError(
+                    "adapt() received an empty iterable (no batches). "
+                    "Expected at least one batch. Pass a non-empty iterable "
+                    "of arrays or tensors, e.g. layer.adapt([x]) or "
+                    "layer.adapt(list_of_batches)."
+                )
+            first_batch = _extract_batch(first_batch)
+            input_shape = getattr(first_batch, "shape", None)
+            if input_shape is None:
+                raise TypeError(
+                    "adapt() expects an iterable that yields arrays or "
+                    "tensors with a `.shape` attribute (e.g. numpy arrays or "
+                    "backend tensors). Got an element of type "
+                    f"{type(first_batch).__name__}. Ensure each yielded "
+                    "element is array-like with a `.shape` attribute."
+                )
+            input_shape = tuple(input_shape)
+            data = itertools.chain([first_batch], data_iter)
         else:
             raise TypeError(
                 f"Unsupported data type: {type(data)}. `adapt` supports "
-                f"`np.ndarray`, backend tensors, `tf.data.Dataset`, and "
-                f"`keras.utils.PyDataset`."
+                f"`np.ndarray`, backend tensors, `tf.data.Dataset`, "
+                f"`keras.utils.PyDataset`, and iterables of batches (e.g. "
+                f"list, generator)."
             )
 
         if not self.built:
@@ -297,17 +347,44 @@ class Normalization(DataLayer):
         if isinstance(data, np.ndarray):
             total_mean = np.mean(data, axis=self._reduce_axis)
             total_var = np.var(data, axis=self._reduce_axis)
-        elif backend.is_tensor(data):
+        elif backend.ops.is_tensor(data):
             total_mean = ops.mean(data, axis=self._reduce_axis)
             total_var = ops.var(data, axis=self._reduce_axis)
-        elif isinstance(data, (tf.data.Dataset, PyDataset)):
+        elif isinstance(data, (tf.data.Dataset, PyDataset)) or data_is_iterable:
             total_mean = ops.zeros(self._mean_and_var_shape)
             total_var = ops.zeros(self._mean_and_var_shape)
             total_count = 0
-            for batch in data:
-                batch = backend.convert_to_tensor(
+
+            steps = None
+            if hasattr(data, "cardinality"):
+                cardinality = data.cardinality()
+                if cardinality.numpy() not in (
+                    tf.data.UNKNOWN_CARDINALITY,
+                    tf.data.INFINITE_CARDINALITY,
+                ):
+                    steps = int(cardinality.numpy())
+
+            progbar = Progbar(target=steps, unit_name="step")
+
+            for i, batch in enumerate(data):
+                batch = _extract_batch(batch)
+                batch = backend.ops.convert_to_tensor(
                     batch, dtype=self.compute_dtype
                 )
+                for d in self._keep_axis:
+                    batch_dim = batch.shape[d]
+                    expected = self._build_input_shape[d]
+                    if (
+                        batch_dim is not None
+                        and expected is not None
+                        and batch_dim != expected
+                    ):
+                        raise ValueError(
+                            "adapt() yielded a batch with incompatible "
+                            "shape. Expected "
+                            f"{self._build_input_shape}, got "
+                            f"{tuple(batch.shape)}."
+                        )
                 batch_mean = ops.mean(batch, axis=self._reduce_axis)
                 batch_var = ops.var(batch, axis=self._reduce_axis)
                 if self._reduce_axis:
@@ -333,6 +410,9 @@ class Normalization(DataLayer):
                     batch_var + (batch_mean - new_total_mean) ** 2
                 ) * batch_weight
                 total_mean = new_total_mean
+                progbar.update(i + 1)
+
+            progbar.update(steps if steps is not None else i + 1, finalize=True)
         else:
             raise NotImplementedError(f"Unsupported data type: {type(data)}")
 
@@ -361,7 +441,7 @@ class Normalization(DataLayer):
                 "You must call `.build(input_shape)` "
                 "on the layer before using it."
             )
-        inputs = self.backend.core.convert_to_tensor(
+        inputs = self.backend.ops.convert_to_tensor(
             inputs, dtype=self.compute_dtype
         )
         # Ensure the weights are in the correct backend. Without this, it is
@@ -369,20 +449,20 @@ class Normalization(DataLayer):
         mean = self.convert_weight(self.mean)
         variance = self.convert_weight(self.variance)
         if self.invert:
-            return self.backend.numpy.add(
+            return self.backend.ops.numpy.add(
                 mean,
-                self.backend.numpy.multiply(
+                self.backend.ops.numpy.multiply(
                     inputs,
-                    self.backend.numpy.maximum(
-                        self.backend.numpy.sqrt(variance), backend.epsilon()
+                    self.backend.ops.numpy.maximum(
+                        self.backend.ops.numpy.sqrt(variance), backend.epsilon()
                     ),
                 ),
             )
         else:
-            return self.backend.numpy.divide(
-                self.backend.numpy.subtract(inputs, mean),
-                self.backend.numpy.maximum(
-                    self.backend.numpy.sqrt(variance), backend.epsilon()
+            return self.backend.ops.numpy.divide(
+                self.backend.ops.numpy.subtract(inputs, mean),
+                self.backend.ops.numpy.maximum(
+                    self.backend.ops.numpy.sqrt(variance), backend.epsilon()
                 ),
             )
 

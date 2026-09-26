@@ -51,7 +51,7 @@ class TimeDistributed(Wrapper):
                 f"`keras.layers.Layer` instance. Received: {layer}"
             )
         super().__init__(layer, **kwargs)
-        self.supports_masking = True
+        self.supports_masking = False
 
     def _get_child_input_shape(self, input_shape):
         if not isinstance(input_shape, (tuple, list)) or len(input_shape) < 3:
@@ -133,9 +133,9 @@ class TimeDistributed(Wrapper):
             )
             return time_distributed_transpose(outputs)
 
-        # Implementation #2: use backend.vectorized_map.
+        # Implementation #2: use backend.ops.vectorized_map.
 
-        outputs = backend.vectorized_map(
+        outputs = backend.ops.vectorized_map(
             step_function, ops.arange(input_shape[0])
         )
         return time_distributed_transpose(outputs)

@@ -67,7 +67,7 @@ class _ConfusionMatrixConditionCount(Metric):
             result = self.accumulator[0]
         else:
             result = self.accumulator
-        return backend.convert_to_tensor(result)
+        return backend.ops.convert_to_tensor(result)
 
     def get_config(self):
         config = {"thresholds": self.init_thresholds}
@@ -667,7 +667,7 @@ class SensitivitySpecificityBase(Metric):
         feasible = predicate(constrained, self.value)
         # Mask values based on whether they satisfy the constraint and take max.
         return ops.max(
-            ops.multiply(dependent, ops.cast(feasible, dependent.dtype)),
+            ops.where(feasible, dependent, 0),
             initial=0,
         )
 

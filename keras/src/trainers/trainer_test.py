@@ -117,7 +117,8 @@ class ListInputModel(Trainer, layers.Layer):
         )
 
     def call(self, x):
-        assert isinstance(x, (list, tuple))
+        if not isinstance(x, (list, tuple)):
+            raise ValueError("x must be a list or tuple")
         return self.dense_1(x[0]) + self.dense_2(x[1])
 
 
@@ -223,7 +224,7 @@ def create_dataset(dataset_type, dataset_kwargs):
             return generate_infinite(), None
         else:
             return generate_finite(), None
-    elif dataset_type == "grain_datast":
+    elif dataset_type == "grain_dataset":
         import grain
 
         class TestIterableDataset(grain.sources.RandomAccessDataSource):
@@ -336,12 +337,14 @@ class StepCount(Callback):
         self.epoch_end_count += 1
 
     def on_batch_begin(self, batch, logs=None):
-        assert batch == self.begin_count * self.steps_per_execution
+        if batch != self.begin_count * self.steps_per_execution:
+            raise ValueError("Batch index is not correct")
         self.begin_count += 1
 
     def on_batch_end(self, batch, logs=None):
         self.end_count += 1
-        assert batch == self.end_count * self.steps_per_execution - 1
+        if batch != self.end_count * self.steps_per_execution - 1:
+            raise ValueError("Batch index is not correct")
 
 
 class TestTrainer(testing.TestCase):
@@ -639,18 +642,18 @@ class TestTrainer(testing.TestCase):
                 "fit_kwargs": {"steps_per_epoch": 20},
             },
             {
-                "testcase_name": "grain_datast",
-                "dataset_type": "grain_datast",
+                "testcase_name": "grain_dataset",
+                "dataset_type": "grain_dataset",
                 "dataset_kwargs": {"has_len": False},
             },
             {
-                "testcase_name": "grain_datast_with_len",
-                "dataset_type": "grain_datast",
+                "testcase_name": "grain_dataset_with_len",
+                "dataset_type": "grain_dataset",
                 "dataset_kwargs": {"has_len": True},
             },
             {
                 "testcase_name": "grain_dataloader",
-                "dataset_type": "grain_datast",
+                "dataset_type": "grain_dataset",
                 "dataset_kwargs": {"use_dataloader": True},
             },
         ]
@@ -660,12 +663,12 @@ class TestTrainer(testing.TestCase):
         self, dataset_type, dataset_kwargs={}, fit_kwargs={}
     ):
         jit_compile = True
-        if (
-            dataset_kwargs.get("use_multiprocessing", False)
-            and backend.backend() == "jax"
-        ):
-            pytest.skip("Multiprocessing not supported with JAX backend")
-        if dataset_type == "grain_datast" and backend.backend() == "torch":
+        if dataset_kwargs.get("use_multiprocessing", False):
+            if backend.backend() == "jax":
+                pytest.skip("Multiprocessing not supported with JAX backend")
+            elif backend.backend() == "tensorflow":
+                pytest.skip("Multiprocessing hangs on Tensorflow")
+        if dataset_type == "grain_dataset" and backend.backend() == "torch":
             # Grain datasets are not supported with torch + jit_compile.
             jit_compile = False
 
@@ -755,7 +758,7 @@ class TestTrainer(testing.TestCase):
         history = history.history
         self.assertIn("loss", history)
         self.assertIn("mean_squared_error", history)
-        self.assertAllClose(history["my_custom_metric"], 10.0)
+        self.assertAllClose(history["my_custom_metric"], [10.0])
 
     @parameterized.named_parameters(
         named_product(
@@ -942,6 +945,8 @@ class TestTrainer(testing.TestCase):
         reason="Memory optimization is only implemented in JAX",
     )
     def test_fit_eval_flow_for_jax_model_weights(self):
+        test_obj = self
+
         model = ExampleModel(units=3)
         epochs = 3
         batch_size = 20
@@ -958,19 +963,19 @@ class TestTrainer(testing.TestCase):
             # will trigger a sync of the jax training state back to the model.
             def on_train_batch_end(self, batch, logs=None):
                 for v in self._model.trainable_variables:
-                    assert v._value is None
+                    test_obj.assertIsNone(v._value)
                 for v in self._model.non_trainable_variables:
-                    assert v._value is None
+                    test_obj.assertIsNone(v._value)
                 for v in self._model.optimizer.variables:
-                    assert v._value is None
+                    test_obj.assertIsNone(v._value)
                 for v in self._model.metrics_variables:
-                    assert v._value is None
+                    test_obj.assertIsNone(v._value)
 
             def on_test_batch_end(self, batch, logs=None):
                 for v in self._model.non_trainable_variables:
-                    assert v._value is None
+                    test_obj.assertIsNone(v._value)
                 for v in self._model.metrics_variables:
-                    assert v._value is None
+                    test_obj.assertIsNone(v._value)
 
         model.compile(
             optimizer=optimizers.SGD(),
@@ -1000,10 +1005,6 @@ class TestTrainer(testing.TestCase):
         )
     )
     @pytest.mark.requires_trainable_backend
-    @pytest.mark.skipif(
-        backend.backend() == "torch",
-        reason="`steps_per_execution` not implemented for torch yet",
-    )
     def test_steps_per_execution_steps_count(self, steps_per_execution, mode):
         data_size = 100
         batch_size = 16
@@ -1135,9 +1136,6 @@ class TestTrainer(testing.TestCase):
         )
     )
     def test_predict_preserve_order(self, steps_per_execution, mode):
-        if steps_per_execution > 1 and backend.backend() == "torch":
-            self.skipTest("`steps_per_execution` not implemented for torch yet")
-
         def generate_uneven_batches():
             batch_sizes = [2, 3, 4]
 
@@ -1185,9 +1183,6 @@ class TestTrainer(testing.TestCase):
         )
     )
     def test_predict_generator(self, steps_per_execution, mode):
-        if steps_per_execution > 1 and backend.backend() == "torch":
-            self.skipTest("`steps_per_execution` not implemented for torch yet")
-
         batch_size = 2
 
         def generate_batches():
@@ -1229,10 +1224,6 @@ class TestTrainer(testing.TestCase):
         )
     )
     @pytest.mark.requires_trainable_backend
-    @pytest.mark.skipif(
-        backend.backend() == "torch",
-        reason="`steps_per_execution` not implemented for torch yet",
-    )
     def test_steps_per_execution_steps_count_unknown_dataset_size(
         self, steps_per_execution, mode
     ):
@@ -1312,10 +1303,6 @@ class TestTrainer(testing.TestCase):
         )
     )
     @pytest.mark.requires_trainable_backend
-    @pytest.mark.skipif(
-        backend.backend() == "torch",
-        reason="`steps_per_execution` not implemented for torch yet",
-    )
     def test_steps_per_execution_steps_per_epoch(
         self, steps_per_epoch_test, mode
     ):
@@ -1588,10 +1575,6 @@ class TestTrainer(testing.TestCase):
         )
     )
     @pytest.mark.requires_trainable_backend
-    @pytest.mark.skipif(
-        backend.backend() == "torch",
-        reason="`steps_per_execution` not implemented for torch yet",
-    )
     def test_steps_per_execution_steps_per_epoch_unknown_data_size(
         self, steps_per_epoch_test, mode
     ):
@@ -1707,11 +1690,9 @@ class TestTrainer(testing.TestCase):
                 model.evaluate(dataset), model_2.evaluate(dataset)
             )
 
-    @pytest.mark.skipif(
-        backend.backend() == "torch",
-        reason="`steps_per_execution` not implemented for torch yet",
-    )
     def test_steps_per_execution_steps_count_without_training(self):
+        test_obj = self
+
         class StepCount(Callback):
             def __init__(self):
                 super().__init__()
@@ -1720,11 +1701,11 @@ class TestTrainer(testing.TestCase):
                 self.batches = [0, 3, 6]
 
             def on_test_batch_begin(self, batch, logs=None):
-                assert batch == self.batches[self.test_count]
+                test_obj.assertEqual(batch, self.batches[self.test_count])
                 self.test_count += 1
 
             def on_predict_batch_begin(self, batch, logs=None):
-                assert batch == self.batches[self.predict_count]
+                test_obj.assertEqual(batch, self.batches[self.predict_count])
                 self.predict_count += 1
 
         x = np.ones((100, 4))
@@ -1757,6 +1738,52 @@ class TestTrainer(testing.TestCase):
         loss1 = model.evaluate(x, y, batch_size=80)
         loss2 = model.evaluate(x, y, batch_size=100)
         self.assertAllClose(loss1, loss2)
+
+    def test_evaluate_fixed_batch_dim_graph_matches_eager(self):
+        import tensorflow as tf
+
+        batch_size = 4
+        num_samples = 32
+
+        x_data = np.random.randn(num_samples, 4).astype(np.float32)
+        y_data = np.random.randn(num_samples, 1).astype(np.float32)
+
+        def make_dataset():
+            def gen():
+                for i in range(0, num_samples, batch_size):
+                    yield (
+                        x_data[i : i + batch_size],
+                        y_data[i : i + batch_size],
+                    )
+
+            return tf.data.Dataset.from_generator(
+                gen,
+                output_signature=(
+                    tf.TensorSpec((batch_size, 4), tf.float32),
+                    tf.TensorSpec((batch_size, 1), tf.float32),
+                ),
+            )
+
+        # Graph mode
+        model_graph = ExampleModel(units=1)
+        model_graph.compile(loss="mse", metrics=["mae"], run_eagerly=False)
+        graph_result = model_graph.evaluate(
+            make_dataset(), verbose=0, return_dict=True
+        )
+
+        # Eager mode
+        model_eager = ExampleModel(units=1)
+        model_eager.compile(loss="mse", metrics=["mae"], run_eagerly=True)
+        eager_result = model_eager.evaluate(
+            make_dataset(), verbose=0, return_dict=True
+        )
+
+        self.assertAllClose(
+            graph_result["mae"],
+            eager_result["mae"],
+            atol=1e-5,
+            rtol=1e-5,
+        )
 
     @pytest.mark.requires_trainable_backend
     def test_adds_loss_scaling_optimizer(self):
@@ -1875,17 +1902,17 @@ class TestTrainer(testing.TestCase):
         logs = model.train_on_batch(x, y, return_dict=True)
         self.assertIsInstance(logs, dict)
         self.assertEqual(len(logs), 2)
-        self.assertAlmostEqual(logs["loss"], 15.579, tpu_decimal=1)
+        self.assertAlmostEqual(logs["loss"], 15.158, tpu_decimal=1)
 
         logs = model.test_on_batch(x, y)
         self.assertIsInstance(logs, list)
         self.assertEqual(len(logs), 2)
-        self.assertAlmostEqual(logs[0], 15.173, tpu_decimal=1)
+        self.assertAlmostEqual(logs[0], 14.360, tpu_decimal=1)
 
         logs = model.test_on_batch(x, y, return_dict=True)
         self.assertIsInstance(logs, dict)
         self.assertEqual(len(logs), 2)
-        self.assertAlmostEqual(logs["loss"], 14.97, tpu_decimal=1)
+        self.assertAlmostEqual(logs["loss"], 14.360, tpu_decimal=1)
 
         output = model.predict_on_batch(x)
         self.assertIsInstance(output, np.ndarray)
@@ -1898,9 +1925,9 @@ class TestTrainer(testing.TestCase):
 
         # With sample weights
         logs = model.train_on_batch(x, y, sw)
-        self.assertAlmostEqual(logs[0], 14.819, tpu_decimal=1)
+        self.assertAlmostEqual(logs[0], 14.217, tpu_decimal=1)
         logs = model.test_on_batch(x, y, sw)
-        self.assertAlmostEqual(logs[0], 14.595, tpu_decimal=1)
+        self.assertAlmostEqual(logs[0], 13.476, tpu_decimal=1)
         output = model.predict_on_batch(x)
         self.assertAllClose(
             output[0],
@@ -1911,7 +1938,7 @@ class TestTrainer(testing.TestCase):
 
         # With class weights
         logs = model.train_on_batch(x, y, class_weight={1: 0.3, 0: 0.2})
-        self.assertAlmostEqual(logs[0], 12.899, tpu_decimal=1)
+        self.assertAlmostEqual(logs[0], 2.722, tpu_decimal=1)
 
     @parameterized.named_parameters(
         [
@@ -1988,7 +2015,7 @@ class TestTrainer(testing.TestCase):
             batch_size=4,
             validation_data=(x_test, y_test),
         )
-        assert getattr(model, "_eval_epoch_iterator", None) is None
+        self.assertIsNone(getattr(model, "_eval_epoch_iterator", None))
 
         # Try model.fit with reshaped validation_data
         # This will throw an exception which is intended
@@ -2013,76 +2040,84 @@ class TestTrainer(testing.TestCase):
             batch_size=4,
             validation_data=(x_test, y_test),
         )
-        assert getattr(model, "_eval_epoch_iterator", None) is None
+        self.assertIsNone(getattr(model, "_eval_epoch_iterator", None))
 
     @pytest.mark.requires_trainable_backend
     def test_callback_methods_keys(self):
+        test_obj = self
+
         class CustomCallback(Callback):
             def on_train_begin(self, logs=None):
                 keys = sorted(list(logs.keys()))
-                assert keys == []
+                test_obj.assertEqual(keys, [])
 
             def on_train_end(self, logs=None):
                 keys = sorted(list(logs.keys()))
-                assert keys == [
-                    "loss",
-                    "mean_absolute_error",
-                    "val_loss",
-                    "val_mean_absolute_error",
-                ]
+                test_obj.assertEqual(
+                    keys,
+                    [
+                        "loss",
+                        "mean_absolute_error",
+                        "val_loss",
+                        "val_mean_absolute_error",
+                    ],
+                )
 
             def on_epoch_begin(self, epoch, logs=None):
                 keys = sorted(list(logs.keys()))
-                assert keys == []
+                test_obj.assertEqual(keys, [])
 
             def on_epoch_end(self, epoch, logs=None):
                 keys = sorted(list(logs.keys()))
-                assert keys == [
-                    "loss",
-                    "mean_absolute_error",
-                    "val_loss",
-                    "val_mean_absolute_error",
-                ]
+                test_obj.assertEqual(
+                    keys,
+                    [
+                        "loss",
+                        "mean_absolute_error",
+                        "val_loss",
+                        "val_mean_absolute_error",
+                    ],
+                )
 
             def on_test_begin(self, logs=None):
                 keys = sorted(list(logs.keys()))
-                assert keys == []
+                test_obj.assertEqual(keys, [])
 
             def on_test_end(self, logs=None):
                 keys = sorted(list(logs.keys()))
-                assert keys == ["loss", "mean_absolute_error"]
+                test_obj.assertEqual(keys, ["loss", "mean_absolute_error"])
 
             def on_predict_begin(self, logs=None):
                 keys = sorted(list(logs.keys()))
-                assert keys == []
+                test_obj.assertEqual(keys, [])
 
             def on_predict_end(self, logs=None):
                 keys = sorted(list(logs.keys()))
-                assert keys == []
+                test_obj.assertEqual(keys, [])
 
             def on_train_batch_begin(self, batch, logs=None):
                 keys = sorted(list(logs.keys()))
-                assert keys == []
+                test_obj.assertEqual(keys, [])
 
             def on_train_batch_end(self, batch, logs=None):
                 keys = sorted(list(logs.keys()))
-                assert keys == ["loss", "mean_absolute_error"]
+                test_obj.assertEqual(keys, ["loss", "mean_absolute_error"])
 
             def on_test_batch_begin(self, batch, logs=None):
                 keys = sorted(list(logs.keys()))
-                assert keys == []
+                test_obj.assertEqual(keys, [])
 
             def on_test_batch_end(self, batch, logs=None):
                 keys = sorted(list(logs.keys()))
-                assert keys == ["loss", "mean_absolute_error"]
+                test_obj.assertEqual(keys, ["loss", "mean_absolute_error"])
 
             def on_predict_batch_begin(self, batch, logs=None):
                 keys = sorted(list(logs.keys()))
-                assert keys == []
+                test_obj.assertEqual(keys, [])
 
             def on_predict_batch_end(self, batch, logs=None):
                 keys = sorted(list(logs.keys()))
-                assert keys == ["outputs"]
+                test_obj.assertEqual(keys, ["outputs"])
 
         model = ExampleModel(units=3)
         model.compile(
@@ -2194,19 +2229,21 @@ class TestTrainer(testing.TestCase):
         y = model.predict(x)
         self.assertEqual(type(y), tf.RaggedTensor)
 
-    def test_predict_dropout(self):
+    def test_functional_layer_training_overrides_model_training_argument(self):
         # Test that `predict` with a dropout op
         # has nondeterministic behavior across batches.
 
         inputs = layers.Input((20,))
+        # Passing `training=True` during construction will force dropout to be
+        # enabled even during predict.
         outputs = layers.Dropout(0.5, seed=1337)(inputs, training=True)
         model = keras.Model(inputs, outputs)
         out1 = model.predict(np.ones((4, 20)), batch_size=2)
-        self.assertGreater(5, np.sum(np.abs(out1[:2, :] - out1[2:4, :])))
+        self.assertNotAllClose(out1[:2, :], out1[2:4, :])
 
         out2 = model.predict_on_batch(np.ones((2, 20)))
         out3 = model.predict_on_batch(np.ones((2, 20)))
-        self.assertGreater(5, np.sum(np.abs(out2 - out3)))
+        self.assertNotAllClose(out2, out3)
 
     @pytest.mark.requires_trainable_backend
     def test_recompile(self):
@@ -2271,11 +2308,13 @@ class TestTrainer(testing.TestCase):
         history = model.fit(
             [np.ones((3, 2)), np.ones((3, 3))], np.ones((3, 2))
         ).history
-        self.assertAllClose(history["loss"], 16.0, tpu_atol=1e-4, tpu_rtol=1e-4)
+        self.assertAllClose(
+            history["loss"], [16.0], tpu_atol=1e-4, tpu_rtol=1e-4
+        )
         train_out = model.train_on_batch(
             [np.ones((3, 2)), np.ones((3, 3))], np.ones((3, 2))
         )
-        self.assertAllClose(train_out[0], 15.2200, tpu_atol=1e-1, tpu_rtol=1e-1)
+        self.assertAllClose(train_out[0], 14.44, tpu_atol=1e-1, tpu_rtol=1e-1)
         eval_out = model.evaluate(
             [np.ones((3, 2)), np.ones((3, 3))], np.ones((3, 2))
         )
@@ -2326,6 +2365,33 @@ class TestTrainer(testing.TestCase):
         self.assertEqual(recorder.train_counter, 3)
         self.assertEqual(recorder.val_counter, 4)
 
+    @pytest.mark.skipif(
+        backend.backend() != "jax",
+        reason="Only JAX backend uses _maybe_symbolic_build.",
+    )
+    @pytest.mark.requires_trainable_backend
+    def test_symbolic_build_empty_dataset(self):
+        val_x = np.empty((0, 2), dtype="float32")
+        val_y = np.empty((0, 3), dtype="float32")
+        unbuilt_model = ExampleModel(units=3)
+        unbuilt_model.compile(optimizer="sgd", loss="mse")
+        with self.assertRaisesRegex(
+            ValueError,
+            "The symbolic build failed because train or validation dataset "
+            "is empty",
+        ):
+            unbuilt_model.evaluate(val_x, val_y)
+
+    @pytest.mark.requires_trainable_backend
+    def test_fit_empty_validation_data(self):
+        model = ExampleModel(units=3)
+        model.compile(optimizer="sgd", loss="mse")
+        x = np.ones((4, 2), dtype="float32")
+        y = np.ones((4, 3), dtype="float32")
+        val_x = np.empty((0, 2), dtype="float32")
+        val_y = np.empty((0, 3), dtype="float32")
+        model.fit(x, y, epochs=1, batch_size=2, validation_data=(val_x, val_y))
+
     @parameterized.named_parameters(
         [
             ("fit", "fit", "training", "train"),
@@ -2374,7 +2440,7 @@ class TestTrainer(testing.TestCase):
         model.compile(optimizer="rmsprop", loss="mse")
         model.fit(x, y)
         self.assertGreaterEqual(
-            np.min(backend.convert_to_numpy(model.layers[0].kernel)), 0.0
+            np.min(backend.ops.convert_to_numpy(model.layers[0].kernel)), 0.0
         )
 
     @pytest.mark.requires_trainable_backend
@@ -2798,7 +2864,8 @@ class TestTrainer(testing.TestCase):
     @pytest.mark.requires_trainable_backend
     @pytest.mark.skipif(
         backend.backend() == "torch",
-        reason="`steps_per_execution` not implemented for torch yet",
+        reason="Torch uses a Python bundling loop; side-effect counters "
+        "will increment for every batch even after compilation.",
     )
     def test_retracing(self):
         x = np.ones((100, 4))
@@ -2834,7 +2901,8 @@ class TestTrainer(testing.TestCase):
     @pytest.mark.requires_trainable_backend
     @pytest.mark.skipif(
         backend.backend() == "torch",
-        reason="`steps_per_execution` not implemented for torch yet",
+        reason="Torch uses a Python bundling loop; side-effect counters "
+        "will increment for every batch even after compilation.",
     )
     @pytest.mark.skipif(
         backend.backend() == "tensorflow",

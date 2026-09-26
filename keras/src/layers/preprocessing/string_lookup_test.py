@@ -1,7 +1,9 @@
 import os
 
+import grain
 import numpy as np
 import pytest
+import tensorflow as tf
 from tensorflow import data as tf_data
 
 from keras.src import backend
@@ -65,8 +67,47 @@ class StringLookupTest(testing.TestCase):
         layer.adapt(["a", "a", "a", "b", "b", "c"])
         input_data = ["b", "c", "d"]
         output = layer(input_data)
-        self.assertTrue(backend.is_tensor(output))
+        self.assertTrue(backend.ops.is_tensor(output))
         self.assertAllClose(output, np.array([2, 3, 0]))
+        self.assertIn("a", [str(v) for v in layer.get_vocabulary()])
+
+    def test_adapt_with_generator(self):
+        def vocab_gen():
+            yield ["cat", "dog"]
+            yield ["bird", "cat"]
+
+        layer = layers.StringLookup()
+        layer.adapt(vocab_gen())
+        vocab = layer.get_vocabulary()
+        self.assertIn("cat", [str(v) for v in vocab])
+        self.assertIn("dog", [str(v) for v in vocab])
+        self.assertIn("bird", [str(v) for v in vocab])
+
+    def test_adapt_with_infinite_generator_and_steps(self):
+        def vocab_gen():
+            while True:
+                yield ["cat", "dog", "bird"]
+
+        layer = layers.StringLookup()
+        layer.adapt(vocab_gen(), steps=3)
+        vocab = layer.get_vocabulary()
+        self.assertIn("cat", [str(v) for v in vocab])
+
+    def test_adapt_with_grain_dataset(self):
+        words = ["cat", "dog", "bird", "cat", "dog", "bird"]
+
+        class Source(grain.sources.RandomAccessDataSource):
+            def __getitem__(self, idx):
+                return words[idx]
+
+            def __len__(self):
+                return len(words)
+
+        dataset = grain.MapDataset.source(Source()).batch(batch_size=2)
+        layer = layers.StringLookup()
+        layer.adapt(dataset)
+        vocab = layer.get_vocabulary()
+        self.assertIn("cat", [str(v) for v in vocab])
 
     def test_fixed_vocabulary(self):
         layer = layers.StringLookup(
@@ -75,15 +116,13 @@ class StringLookupTest(testing.TestCase):
         )
         input_data = ["b", "c", "d"]
         output = layer(input_data)
-        self.assertTrue(backend.is_tensor(output))
+        self.assertTrue(backend.ops.is_tensor(output))
         self.assertAllClose(output, np.array([2, 3, 0]))
 
     @pytest.mark.skipif(
         not backend.backend() == "tensorflow", reason="Requires tf.SparseTensor"
     )
     def test_sparse_inputs(self):
-        import tensorflow as tf
-
         layer = layers.StringLookup(
             output_mode="int",
             vocabulary=["a", "b", "c"],
@@ -105,7 +144,7 @@ class StringLookupTest(testing.TestCase):
         layer.set_vocabulary(["a", "b", "c"])
         input_data = ["b", "c", "d"]
         output = layer(input_data)
-        self.assertTrue(backend.is_tensor(output))
+        self.assertTrue(backend.ops.is_tensor(output))
         self.assertAllClose(output, np.array([2, 3, 0]))
 
     def test_tf_data_compatibility(self):
@@ -169,7 +208,7 @@ class StringLookupTest(testing.TestCase):
         )
         output = layer([1, 2, 0])
         self.assertAllEqual(
-            backend.convert_to_numpy(output).astype(str),
+            backend.ops.convert_to_numpy(output).astype(str),
             ["a", "b", "[UNK]"],
         )
 
@@ -180,6 +219,22 @@ class StringLookupTest(testing.TestCase):
         )
         output = layer(["a", "a", "a", "b", "b"])
         self.assertEqual(output.shape[-1], len(layer.get_vocabulary()))
+
+    def test_output_mode_tf_idf(self):
+        layer = layers.StringLookup(
+            vocabulary=["a", "b", "c"],
+            output_mode="tf_idf",
+            idf_weights=[0.2, 0.4, 0.6],
+        )
+        output = layer(["a", "b"])
+        self.assertAllClose(output, [0.0, 0.2, 0.4, 0.0])
+        output = layer([["a", "a"], ["c", "a"]])
+        self.assertAllClose(
+            output, [[0.0, 0.4, 0.0, 0.0], [0.0, 0.2, 0.0, 0.6]]
+        )
+        # Test with OOV token (should map to index 0 with average IDF weight)
+        output = layer(["a", "b", "d"])
+        self.assertAllClose(output, [0.4, 0.2, 0.4, 0.0])
 
     def test_output_mode_multi_hot_binary(self):
         layer = layers.StringLookup(
@@ -202,8 +257,6 @@ class StringLookupTest(testing.TestCase):
         reason="Requires tf.SparseTensor",
     )
     def test_sparse_output_in_multi_hot(self):
-        import tensorflow as tf
-
         layer = layers.StringLookup(
             vocabulary=["a", "b", "c"],
             output_mode="multi_hot",
@@ -221,3 +274,56 @@ class StringLookupTest(testing.TestCase):
         vocab = layer.get_vocabulary(include_special_tokens=False)
 
         self.assertEqual(vocab, ["a", "b", "c"])
+
+    @pytest.mark.skipif(
+        backend.backend() == "numpy",
+        reason=(
+            "StringLookup symbolic string Input not supported on numpy backend."
+        ),
+    )
+    def test_one_hot_symbolic_output_shape_nested_input(self):
+        """StringLookup one_hot symbolic shape matches eager for nested input.
+
+        Regression test for gh-22336: symbolic output was (None, max_tokens)
+        instead of (None, d1, d2, ..., max_tokens).
+        """
+        layer = layers.StringLookup(
+            max_tokens=20,
+            num_oov_indices=4,
+            oov_token="[UNK]",
+            vocabulary=["a", "b", "c", "d", "e", "f", "g", "h", "i"],
+            output_mode="one_hot",
+            pad_to_max_tokens=True,
+            sparse=False,
+        )
+        # Symbolic input shape (None, 2, 2) as in the issue
+        symbolic_input = layers.Input(shape=(2, 2), dtype="string")
+        symbolic_output = layer(symbolic_input)
+        self.assertEqual(
+            tuple(symbolic_output.shape),
+            (None, 2, 2, 20),
+            msg="one_hot symbolic output must be (batch, d1, d2, max_tokens)",
+        )
+        # Eager: (2, 2, 2) input -> (2, 2, 2, 20) output
+        input_data = np.array(
+            [[["a", "b"], ["c", "d"]], [["a", "b"], ["c", "d"]]]
+        )
+        eager_output = layer(input_data)
+        self.assertEqual(eager_output.shape, (2, 2, 2, 20))
+        self.assertEqual(
+            tuple(symbolic_output.shape)[1:],
+            eager_output.shape[1:],
+        )
+
+    def test_salt_siphash(self):
+        vocab = ["a", "b", "c"]
+        layer_farmhash = layers.StringLookup(
+            vocabulary=vocab, num_oov_indices=4
+        )
+        layer_siphash = layers.StringLookup(
+            vocabulary=vocab, num_oov_indices=4, salt=[137, 42]
+        )
+        oov_values = ["x", "y", "z", "w", "v", "u"]
+        out_farmhash = backend.ops.convert_to_numpy(layer_farmhash(oov_values))
+        out_siphash = backend.ops.convert_to_numpy(layer_siphash(oov_values))
+        self.assertFalse(np.array_equal(out_farmhash, out_siphash))

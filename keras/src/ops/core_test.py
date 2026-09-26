@@ -15,10 +15,12 @@ from keras.src import testing
 from keras.src import tree
 from keras.src.backend.common import dtypes
 from keras.src.backend.common.keras_tensor import KerasTensor
+from keras.src.backend.common.remat import RematScope
 from keras.src.layers.core import input_layer
 from keras.src.ops import core
 from keras.src.saving import object_registration
 from keras.src.testing.test_utils import named_product
+from keras.src.utils import traceback_utils
 
 
 class CoreOpsDynamicShapeTest(testing.TestCase):
@@ -173,6 +175,31 @@ class CoreOpsDynamicShapeTest(testing.TestCase):
         self.assertEqual(len(out), 3)
         for o in out:
             self.assertEqual(o.shape, (2, None))
+
+    def test_associative_scan_dynamic_scan_body_unknown_length(self):
+        """fully unknown leading dim forces the TF symbolic path."""
+        xs = KerasTensor((None, 6))
+        ys = core.associative_scan(f=operator.add, elems=xs, axis=0)
+        self.assertEqual(ys.shape, (None, 6))
+
+    def test_associative_scan_dynamic_scan_body_unknown_length_structured(self):
+        """symbolic path with structured (tuple) input."""
+        xs = (KerasTensor((None, 4)), KerasTensor((None, 4)))
+
+        def _add(a, b):
+            return (a[0] + b[0], a[1] + b[1])
+
+        ys = core.associative_scan(f=_add, elems=xs, axis=0)
+        self.assertEqual(ys[0].shape, (None, 4))
+        self.assertEqual(ys[1].shape, (None, 4))
+
+    def test_associative_scan_dynamic_scan_body_unknown_length_reverse(self):
+        """symbolic path with reverse=True."""
+        xs = KerasTensor((None, 3))
+        ys = core.associative_scan(
+            f=operator.add, elems=xs, axis=0, reverse=True
+        )
+        self.assertEqual(ys.shape, (None, 3))
 
 
 class CoreOpsStaticShapeTest(testing.TestCase):
@@ -414,27 +441,62 @@ class CoreOpsStaticShapeTest(testing.TestCase):
         for o in out:
             self.assertEqual(o.shape, (2, 4))
 
+    def test_associative_scan_dynamic_scan_body_static_length_two(self):
+        """_dynamic_scan_body: static elem_length == 2
+        hits base-case-two branch."""
+        xs = KerasTensor((2, 4))
+        ys = core.associative_scan(f=operator.add, elems=xs, axis=0)
+        self.assertEqual(ys.shape, (2, 4))
+
+    def test_associative_scan_dynamic_scan_body_static_length_three(self):
+        """_dynamic_scan_body: static elem_length == 3
+        hits base-case-three branch."""
+        xs = KerasTensor((3, 4))
+        ys = core.associative_scan(f=operator.add, elems=xs, axis=0)
+        self.assertEqual(ys.shape, (3, 4))
+
+    def test_associative_scan_dynamic_scan_body_static_even_length(self):
+        """_dynamic_scan_body: static even elem_length
+        takes the recursive even path."""
+        xs = KerasTensor((8, 5))
+        ys = core.associative_scan(f=operator.add, elems=xs, axis=0)
+        self.assertEqual(ys.shape, (8, 5))
+
+    def test_associative_scan_dynamic_scan_body_static_odd_length(self):
+        """_dynamic_scan_body: static odd elem_length > 3
+        takes the recursive odd path."""
+        xs = KerasTensor((7, 5))
+        ys = core.associative_scan(f=operator.add, elems=xs, axis=0)
+        self.assertEqual(ys.shape, (7, 5))
+
+    def test_associative_scan_dynamic_scan_body_static_length_one(self):
+        """_dynamic_scan_body: static elem_length == 1
+        returns elems unchanged."""
+        xs = KerasTensor((1, 4))
+        ys = core.associative_scan(f=operator.add, elems=xs, axis=0)
+        self.assertEqual(ys.shape, (1, 4))
+
 
 class CoreOpsCorrectnessTest(testing.TestCase):
     def test_associative_scan(self):
         # Test prefix sum
         arr = np.arange(5)
         result = core.associative_scan(f=operator.add, elems=arr)
-        self.assertAllEqual(result, [0, 1, 3, 6, 10])
+        self.assertAllClose(result, [0, 1, 3, 6, 10])
         # Test reverse
         result = core.associative_scan(f=operator.add, elems=arr, reverse=True)
-        self.assertAllEqual(result, [10, 10, 9, 7, 4])
+        self.assertAllClose(result, [10, 10, 9, 7, 4])
 
         # Test multiple dimensions, across different axes
         batched_arr = np.stack([arr, arr + 1, arr + 2])
         result = core.associative_scan(
             f=operator.add, elems=batched_arr, axis=1
         )
-        self.assertAllEqual(result[2], [2, 5, 9, 14, 20])
+        self.assertAllClose(result[2], [2, 5, 9, 14, 20])
         result = core.associative_scan(
             f=operator.add, elems=batched_arr, axis=0
         )
-        self.assertAllEqual(result[:, 0], [0, 1, 3])
+        self.assertAllClose(result[:, 0], [0, 1, 3])
 
         # Test structured input
         elems = {
@@ -446,7 +508,7 @@ class CoreOpsCorrectnessTest(testing.TestCase):
             return {"a": x["a"] + y["b"], "b": x["b"] + y["b"]}
 
         ax0 = core.associative_scan(f=_dict_add, elems=elems, axis=0)
-        self.assertAllEqual(
+        self.assertAllClose(
             ax0["b"],
             [[6, 7, 8], [15, 17, 19]],
         )
@@ -545,19 +607,19 @@ class CoreOpsCorrectnessTest(testing.TestCase):
         x = np.ones((2,))
         x = ops.convert_to_tensor(x)
         x = ops.convert_to_numpy(x)
-        self.assertAllEqual(x, (1, 1))
+        self.assertAllClose(x, (1, 1))
         self.assertIsInstance(x, np.ndarray)
 
         # Empty lists should give an empty array.
         x = ops.convert_to_tensor([])
         np_x = ops.convert_to_numpy(x)
         self.assertTrue(ops.is_tensor(x))
-        self.assertAllEqual(x, [])
+        self.assertAllClose(x, [])
         self.assertIsInstance(np_x, np.ndarray)
 
         # Partially converted.
         x = ops.convert_to_tensor((1, ops.array(2), 3))
-        self.assertAllEqual(x, (1, 2, 3))
+        self.assertAllClose(x, (1, 2, 3))
 
     @pytest.mark.skipif(
         not backend.SUPPORTS_SPARSE_TENSORS,
@@ -612,13 +674,11 @@ class CoreOpsCorrectnessTest(testing.TestCase):
         self.assertIsInstance(x_numpy, np.ndarray)
         self.assertAllClose(x_numpy, x_dense)
 
-    @pytest.mark.skipif(
-        backend.backend() not in ("tensorflow", "jax", "torch"),
-        reason=(
-            f"{backend.backend()} backend doesn't support `custom_gradient`."
-        ),
-    )
     @parameterized.named_parameters(named_product(use_variable=(False, True)))
+    @pytest.mark.skipif(
+        not backend.SUPPORTS_GRADIENT,
+        reason="Backend does not support gradients.",
+    )
     def test_custom_gradient(self, use_variable):
         # function to test custom_gradient on
         @ops.custom_gradient
@@ -653,32 +713,12 @@ class CoreOpsCorrectnessTest(testing.TestCase):
         else:
             to_derive = log1pexp
 
-        if backend.backend() == "tensorflow":
-            import tensorflow as tf
-
-            with tf.GradientTape() as tape1:
-                tape1.watch(x)
-                y = to_derive(x)
-            with tf.GradientTape() as tape2:
-                tape2.watch(x)
-                z = log1pexp_nan(x)
-            dy_dx = tape1.gradient(y, x)
-            dz_dx = tape2.gradient(z, x)
-            self.assertEqual(ops.convert_to_numpy(dy_dx), 1.0)
-        elif backend.backend() == "jax":
-            import jax
-
-            dy_dx = jax.grad(to_derive)(x)
-            dz_dx = jax.grad(log1pexp_nan)(x)
-            self.assertEqual(ops.convert_to_numpy(dy_dx), 1.0)
+        dy_dx = ops.grad(to_derive)(x)
+        self.assertEqual(ops.convert_to_numpy(dy_dx), 1.0)
+        if backend.backend() != "tensorflow":
+            # TensorFlow's `log` and `exp` gradients are defined at 100.0.
+            dz_dx = ops.grad(log1pexp_nan)(x)
             self.assertTrue(ops.isnan(dz_dx))
-        elif backend.backend() == "torch":
-            import torch
-
-            x = torch.tensor(100.0, requires_grad=True)
-            z = to_derive(x)
-            z.sum().backward()
-            self.assertEqual(ops.convert_to_numpy(x.grad), 1.0)
 
     def test_dynamic_slice(self):
         def cond(index, inputs, sum):
@@ -873,7 +913,7 @@ class CoreOpsCorrectnessTest(testing.TestCase):
 
     def test_is_tensor(self):
         np_x = np.array([[1, 2, 3], [3, 2, 1]])
-        x = backend.convert_to_tensor(np_x)
+        x = backend.ops.convert_to_tensor(np_x)
         if backend.backend() != "numpy":
             self.assertFalse(ops.is_tensor(np_x))
         self.assertTrue(ops.is_tensor(x))
@@ -981,8 +1021,9 @@ class CoreOpsCorrectnessTest(testing.TestCase):
             return (carry[1], carry[0] + carry[1]), None
 
         init = (np.array(0, dtype="float32"), np.array(1, dtype="float32"))
-        carry, _ = core.scan(fibonaccis, init, length=6)
-        self.assertAllClose(carry, [8, 13])
+        (carry1, carry2), _ = core.scan(fibonaccis, init, length=6)
+        self.assertAllClose(carry1, 8)
+        self.assertAllClose(carry2, 13)
 
         # Test nested init
         if backend.backend() != "tensorflow":
@@ -1158,11 +1199,11 @@ class CoreOpsCorrectnessTest(testing.TestCase):
     def test_shape(self):
         x = ops.ones((2, 3, 7, 1))
         self.assertEqual(core.shape(x).__class__, tuple)
-        self.assertAllEqual(core.shape(x), (2, 3, 7, 1))
+        self.assertEqual(core.shape(x), (2, 3, 7, 1))
 
         x = KerasTensor((None, 3, None, 1))
         self.assertEqual(core.shape(x).__class__, tuple)
-        self.assertAllEqual(core.shape(x), (None, 3, None, 1))
+        self.assertEqual(core.shape(x), (None, 3, None, 1))
 
     @pytest.mark.skipif(
         not backend.SUPPORTS_SPARSE_TENSORS,
@@ -1180,7 +1221,7 @@ class CoreOpsCorrectnessTest(testing.TestCase):
         else:
             self.fail(f"Sparse is unsupported with backend {backend.backend()}")
 
-        self.assertAllEqual(core.shape(x), (2, 3))
+        self.assertEqual(core.shape(x), (2, 3))
 
     @pytest.mark.skipif(
         not backend.SUPPORTS_SPARSE_TENSORS,
@@ -1190,10 +1231,10 @@ class CoreOpsCorrectnessTest(testing.TestCase):
         import tensorflow as tf
 
         x = tf.ragged.constant([[3, 1, 4, 1], [], [5, 9, 2], [6], []])
-        self.assertAllEqual(core.shape(x), (5, None))
+        self.assertEqual(core.shape(x), (5, None))
 
         x = tf.RaggedTensor.from_row_lengths(tf.zeros([15, 2]), [4, 5, 6])
-        self.assertAllEqual(core.shape(x), (3, None, 2))
+        self.assertEqual(core.shape(x), (3, None, 2))
 
     def test_slice(self):
         # Test 1D.
@@ -1301,7 +1342,7 @@ class CoreOpsCorrectnessTest(testing.TestCase):
         d = ops.stop_gradient(b) + c
         model = models.Model(inputs=a, outputs=d)
         output = model(ops.convert_to_tensor([[1.0, 2.0]]))
-        self.assertAllClose(output, 15.0)
+        self.assertAllClose(output, np.full((1, 4), 15.0))
 
         # Test Operation call.
         variable = ops.convert_to_tensor(
@@ -1335,14 +1376,16 @@ class CoreOpsCorrectnessTest(testing.TestCase):
             return x + 1
 
         output = ops.vectorized_map(fn, ops.zeros((2, 3), dtype="float32"))
-        self.assertAllClose(backend.convert_to_numpy(output), np.ones((2, 3)))
+        self.assertAllClose(
+            backend.ops.convert_to_numpy(output), np.ones((2, 3))
+        )
 
         def fn(x):
             return ops.stack([x, x])
 
         output = ops.vectorized_map(fn, ops.zeros((2, 3), dtype="float32"))
         self.assertAllClose(
-            backend.convert_to_numpy(output), np.zeros((2, 2, 3))
+            backend.ops.convert_to_numpy(output), np.zeros((2, 2, 3))
         )
 
         # Case: multiple args
@@ -1457,6 +1500,98 @@ class CoreOpsCorrectnessTest(testing.TestCase):
         for o, o_e in zip(out, out_ex):
             o = ops.convert_to_numpy(o)
             self.assertAllClose(o, o_e)
+
+    @pytest.mark.skipif(
+        backend.backend() != "tensorflow",
+        reason="Dynamic scan fallback is TF-specific.",
+    )
+    def test_associative_scan_dynamic_scan_body_tf_tensorspec_dynamic_fallback(
+        self,
+    ):
+        """Exercises _dynamic_scan_body base-case paths in eager mode."""
+        import tensorflow as tf
+
+        def run_scan(x):
+            return core.associative_scan(f=operator.add, elems=x, axis=0)
+
+        # length == 2
+        x2 = tf.constant([[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]])
+        self.assertAllClose(run_scan(x2), np.cumsum(x2.numpy(), axis=0))
+
+        # length == 3
+        x3 = tf.constant(
+            [[1.0, 0.0, 0.0, 0.0], [2.0, 0.0, 0.0, 0.0], [3.0, 0.0, 0.0, 0.0]]
+        )
+        self.assertAllClose(run_scan(x3), np.cumsum(x3.numpy(), axis=0))
+
+        # length == 1  (trivial / no-op path)
+        x1 = tf.constant([[10.0, 20.0, 30.0, 40.0]])
+        self.assertAllClose(run_scan(x1), x1.numpy())
+
+    @pytest.mark.skipif(
+        backend.backend() != "tensorflow",
+        reason="Dynamic scan fallback is TF-specific.",
+    )
+    def test_associative_scan_dynamic_scan_body_tf_tensorspec_reverse(self):
+        """Dynamic fallback with reverse=True."""
+        import tensorflow as tf
+
+        # length == 3 with reverse
+        arr = tf.constant([1.0, 2.0, 3.0])
+        result = core.associative_scan(
+            f=operator.add, elems=arr, axis=0, reverse=True
+        )
+        # reverse prefix-sum: [1+2+3, 2+3, 3]
+        expected = np.array([6.0, 5.0, 3.0], dtype="float32")
+        self.assertAllClose(result, expected)
+
+    @pytest.mark.skipif(
+        backend.backend() != "tensorflow",
+        reason="Dynamic scan fallback is TF-specific.",
+    )
+    def test_associative_scan_dynamic_scan_body_tf_tensorspec_structured_input(
+        self,
+    ):
+        """Dynamic fallback with a tuple of tensors, lengths <= 3."""
+        import tensorflow as tf
+
+        def _add(x, y):
+            return (x[0] + y[0], x[1] + y[1])
+
+        # length == 3
+        a = tf.constant(np.ones((3, 3), dtype="float32"))
+        b = tf.constant(np.ones((3, 3), dtype="float32") * 2.0)
+        ra, rb = core.associative_scan(f=_add, elems=(a, b), axis=0)
+
+        self.assertAllClose(ra, np.cumsum(a.numpy(), axis=0))
+        self.assertAllClose(rb, np.cumsum(b.numpy(), axis=0))
+
+    @pytest.mark.skipif(
+        backend.backend() != "tensorflow",
+        reason="Dynamic scan fallback is TF-specific.",
+    )
+    def test_associative_scan_dynamic_scan_body_tf_function_dynamic_lengths(
+        self,
+    ):
+        """Exercises the recursive unwind path for lengths > 3 under
+        tf.function with fully dynamic input_signature."""
+        import tensorflow as tf
+
+        @tf.function(input_signature=[tf.TensorSpec([None, 4])])
+        def run_scan(x):
+            return core.associative_scan(f=operator.add, elems=x, axis=0)
+
+        for length in [1, 2, 3, 4, 5, 7, 8, 16]:
+            x = tf.constant(
+                np.arange(length * 4, dtype="float32").reshape(length, 4)
+            )
+            result = run_scan(x)
+            expected = np.cumsum(x.numpy(), axis=0)
+            self.assertAllClose(
+                result,
+                expected,
+                msg=f"Failed for dynamic length={length}",
+            )
 
 
 class CoreOpsDtypeTest(testing.TestCase):
@@ -1628,6 +1763,48 @@ class CoreOpsBehaviorTests(testing.TestCase):
         mock_spec2 = KerasTensor(shape=(2, 2), dtype="float32")
         self.assertTrue(core.Cond()._check_output_spec(mock_spec1, mock_spec2))
 
+    def test_cond_error_message_uses_real_call_signature(self):
+        """Regression test: exceptions raised inside `Cond.__call__` should
+        be augmented using `Cond.call`'s real parameter names (`pred`,
+        `true_fn`, `false_fn`), not the generic `args`/`kwargs` of the
+        internal `call_fn` closure used to dispatch between eager and
+        symbolic execution.
+        """
+        was_enabled = traceback_utils.is_traceback_filtering_enabled()
+        traceback_utils.enable_traceback_filtering()
+        try:
+
+            def raising_true_fn():
+                raise ValueError("boom")
+
+            with self.assertRaises(ValueError) as ctx:
+                core.cond(True, raising_true_fn, lambda: 0)
+            msg = str(ctx.exception)
+            self.assertIn("Cond.call()", msg)
+            self.assertIn("pred=", msg)
+            self.assertIn("true_fn=", msg)
+            self.assertIn("false_fn=", msg)
+            self.assertNotIn("args=", msg)
+            self.assertNotIn("kwargs=", msg)
+        finally:
+            if not was_enabled:
+                traceback_utils.disable_traceback_filtering()
+
+    @parameterized.named_parameters(
+        ("full", "full", {}),
+        ("larger_than", "larger_than", {"output_size_threshold": 1}),
+    )
+    def test_cond_is_not_rematerialized(self, mode, kwargs):
+        """`Cond.call` takes Python callables, which rematerialization cannot
+        trace, so `Cond` overrides `__call__` to stay out of that path. An
+        active `RematScope` must therefore leave `cond` working.
+        """
+        pred = ops.convert_to_tensor(True)
+        x = ops.convert_to_tensor([1.0, 2.0, 3.0])
+        with RematScope(mode=mode, **kwargs):
+            result = ops.cond(pred, lambda: x + 1.0, lambda: x - 1.0)
+        self.assertAllClose(result, [2.0, 3.0, 4.0])
+
     @pytest.mark.requires_trainable_backend
     def test_cond_raw_bool_compile(self):
         class ExampleLayer(layers.Layer):
@@ -1651,6 +1828,50 @@ class CoreOpsBehaviorTests(testing.TestCase):
 
         with self.assertRaises(ValueError):
             ops.convert_to_numpy(KerasTensor((2,)))
+
+    def test_convert_to_tensor_python_float_with_dtype(self):
+        # Regression: a Python float passed with an explicit dtype must
+        # not go through a float64 numpy intermediate. On the torch
+        # backend, torch.export would otherwise lift the float64
+        # constant into the graph before the cast runs.
+        t = ops.convert_to_tensor(1.5, dtype="float32")
+        self.assertEqual(backend.standardize_dtype(t.dtype), "float32")
+        t = ops.convert_to_tensor(1.5, dtype="float16")
+        self.assertEqual(backend.standardize_dtype(t.dtype), "float16")
+
+    def test_convert_to_tensor_python_int_with_dtype(self):
+        t = ops.convert_to_tensor(7, dtype="int16")
+        self.assertEqual(backend.standardize_dtype(t.dtype), "int16")
+        t = ops.convert_to_tensor(7, dtype="float32")
+        self.assertEqual(backend.standardize_dtype(t.dtype), "float32")
+
+    def test_convert_to_tensor_python_bool_with_dtype(self):
+        t = ops.convert_to_tensor(True, dtype="float32")
+        self.assertEqual(backend.standardize_dtype(t.dtype), "float32")
+        t = ops.convert_to_tensor(True)
+        self.assertEqual(backend.standardize_dtype(t.dtype), "bool")
+
+    @pytest.mark.skipif(
+        backend.backend() != "torch",
+        reason="torch.export graph inspection is torch-only.",
+    )
+    def test_convert_to_tensor_python_scalar_no_float64_in_export(self):
+        import torch
+
+        class M(torch.nn.Module):
+            def forward(self, x):
+                scalar = ops.convert_to_tensor(1e-7, dtype="float32")
+                return torch.maximum(x, scalar)
+
+        # torch.export requires all tensors on the same device. Force CPU
+        # so the test is independent of the runner's default device.
+        with backend.device("cpu"):
+            exported = torch.export.export(
+                M(), (torch.ones(5, dtype=torch.float32),)
+            )
+        for val in exported.constants.values():
+            if isinstance(val, torch.Tensor):
+                self.assertNotEqual(val.dtype, torch.float64)
 
     def test_scan_invalid_arguments(self):
         def cumsum(carry, xs):
@@ -1736,3 +1957,156 @@ class CoreOpsBehaviorTests(testing.TestCase):
             ValueError, r"Cannot infer argument `num` from shape"
         ):
             core.unstack(x, axis=axis)
+
+    def test_unstack_axis_out_of_range(self):
+        x = KerasTensor((3, 4))
+        with self.assertRaisesRegex(ValueError, r"axis 10 is out of bounds"):
+            core.unstack(x, axis=10)
+
+
+class WhileLoopCaptureTest(testing.TestCase):
+    def test_while_loop_body_closes_over_outer_tensor(self):
+        # The body reads `captured` from the enclosing scope instead of
+        # receiving it as a loop variable. Backends that lower the loop into a
+        # separate subgraph still have to resolve it; it is constant across
+        # iterations. Run through `predict` so the batch dim is dynamic.
+        class LoopWithCapture(layers.Layer):
+            def call(self, x):
+                captured = x * 2.0
+
+                def cond(i, acc):
+                    return i < 3
+
+                def body(i, acc):
+                    return i + 1, acc + captured
+
+                _, acc = core.while_loop(cond, body, (0, ops.zeros_like(x)))
+                return acc
+
+        x = np.ones((2, 4), dtype="float32")
+        # three iterations, each adding 2 * ones
+        expected = np.full((2, 4), 6.0, dtype="float32")
+
+        self.assertAllClose(LoopWithCapture()(x), expected)
+
+        inputs = input_layer.Input(shape=(4,))
+        model = models.Functional(inputs, LoopWithCapture()(inputs))
+
+        self.assertAllClose(model.predict(x), expected)
+
+
+@pytest.mark.skipif(
+    not backend.SUPPORTS_GRADIENT,
+    reason="Backend does not support gradients.",
+)
+class CoreOpsGradTest(testing.TestCase):
+    def test_grad_single_argument(self):
+        def f(x):
+            return x**2
+
+        x = ops.array([1.0, 2.0, 3.0])
+        self.assertAllClose(ops.grad(f)(x), [2.0, 4.0, 6.0])
+
+    def test_grad_argnums(self):
+        def f(x, y):
+            return x * y
+
+        x = ops.array([1.0, 2.0])
+        y = ops.array([3.0, 4.0])
+        self.assertAllClose(ops.grad(f, argnums=1)(x, y), [1.0, 2.0])
+        dx, dy = ops.grad(f, argnums=(0, 1))(x, y)
+        self.assertAllClose(dx, [3.0, 4.0])
+        self.assertAllClose(dy, [1.0, 2.0])
+        (dy,) = ops.grad(f, argnums=(1,))(x, y)
+        self.assertAllClose(dy, [1.0, 2.0])
+        self.assertAllClose(ops.grad(f, argnums=-1)(x, y), [1.0, 2.0])
+        dx, dy = ops.grad(f, argnums=(-2, -1))(x, y)
+        self.assertAllClose(dx, [3.0, 4.0])
+        self.assertAllClose(dy, [1.0, 2.0])
+
+    def test_grad_keyword_arguments_pass_through(self):
+        def f(x, scale=1.0):
+            return x * scale
+
+        x = ops.array([1.0, 2.0])
+        self.assertAllClose(ops.grad(f)(x, scale=3.0), [3.0, 3.0])
+
+    def test_grad_nested_structure(self):
+        def f(params):
+            return params["a"] ** 2 + params["b"]
+
+        params = {"a": ops.array([1.0, 2.0]), "b": ops.array([3.0])}
+        grads = ops.grad(f)(params)
+        self.assertEqual(set(grads.keys()), {"a", "b"})
+        self.assertAllClose(grads["a"], [2.0, 4.0])
+        self.assertAllClose(grads["b"], [2.0])
+
+    def test_grad_variable_argument(self):
+        def f(x):
+            return x**2
+
+        v = backend.Variable([1.0, 2.0])
+        self.assertAllClose(ops.grad(f)(v), [2.0, 4.0])
+
+    def test_grad_unused_argument_is_zeros(self):
+        def f(x, y):
+            return y
+
+        x = ops.array([1.0, 2.0, 3.0])
+        y = ops.array([1.0])
+        dx, dy = ops.grad(f, argnums=(0, 1))(x, y)
+        self.assertAllClose(dx, [0.0, 0.0, 0.0])
+        self.assertAllClose(dy, [1.0])
+
+    def test_grad_through_layer(self):
+        layer = layers.Dense(2, kernel_initializer="ones", use_bias=False)
+        layer.build((None, 3))
+
+        def f(x):
+            return layer(x)
+
+        x = ops.ones((1, 3))
+        self.assertAllClose(ops.grad(f)(x), [[2.0, 2.0, 2.0]])
+
+    def test_grad_stateless_call(self):
+        layer = layers.Dense(1, kernel_initializer="ones", use_bias=False)
+        layer.build((None, 2))
+
+        def f(trainable_variables, x):
+            return layer.stateless_call(trainable_variables, [], x)[0]
+
+        x = ops.array([[1.0, 2.0]])
+        (dkernel,) = ops.grad(f)(
+            [v.value for v in layer.trainable_variables], x
+        )
+        self.assertAllClose(dkernel, [[1.0], [2.0]])
+
+    def test_grad_non_scalar_output_is_summed(self):
+        x = ops.array([0.0, 1.0])
+        expected = 1.0 - np.tanh(ops.convert_to_numpy(x)) ** 2
+        self.assertAllClose(ops.grad(ops.tanh)(x), expected)
+
+    def test_grad_invalid_argnums(self):
+        def f(x, y):
+            return ops.sum(x * y)
+
+        x = ops.array([1.0])
+        with self.assertRaisesRegex(ValueError, "positional argument 2"):
+            ops.grad(f, argnums=2)(x, x)
+        with self.assertRaisesRegex(ValueError, "positional argument -3"):
+            ops.grad(f, argnums=-3)(x, x)
+        with self.assertRaisesRegex(ValueError, "must not repeat"):
+            ops.grad(f, argnums=(0, 0))(x, x)
+        with self.assertRaisesRegex(ValueError, "must not repeat"):
+            ops.grad(f, argnums=(1, -1))(x, x)
+        with self.assertRaisesRegex(TypeError, "int or a tuple of ints"):
+            ops.grad(f, argnums="0")(x, x)
+
+
+@pytest.mark.skipif(
+    backend.SUPPORTS_GRADIENT, reason="Backend supports gradients."
+)
+class CoreOpsGradUnsupportedTest(testing.TestCase):
+    def test_grad_raises(self):
+        with self.assertRaisesRegex(NotImplementedError, "not supported"):
+            ops.grad(lambda x: x)(ops.array([1.0]))

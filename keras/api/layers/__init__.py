@@ -76,6 +76,7 @@ from keras.src.layers.core.masking import Masking as Masking
 from keras.src.layers.core.reversible_embedding import (
     ReversibleEmbedding as ReversibleEmbedding,
 )
+from keras.src.layers.core.ternary_dense import TernaryDense as TernaryDense
 from keras.src.layers.core.wrapper import Wrapper as Wrapper
 from keras.src.layers.input_spec import InputSpec as InputSpec
 from keras.src.layers.layer import Layer as Layer
@@ -209,6 +210,9 @@ from keras.src.layers.preprocessing.image_preprocessing.auto_contrast import (
 )
 from keras.src.layers.preprocessing.image_preprocessing.center_crop import (
     CenterCrop as CenterCrop,
+)
+from keras.src.layers.preprocessing.image_preprocessing.clahe import (
+    ContrastLimitedAdaptiveHistogramEqualization as ContrastLimitedAdaptiveHistogramEqualization,
 )
 from keras.src.layers.preprocessing.image_preprocessing.cut_mix import (
     CutMix as CutMix,

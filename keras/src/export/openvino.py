@@ -49,16 +49,17 @@ def export_openvino(
     model.export("model.xml", format="openvino")
     ```
     """
-    assert filepath.endswith(".xml"), (
-        "The OpenVINO export requires the filepath to end with '.xml'. "
-        f"Got: {filepath}"
-    )
+    if not filepath.endswith(".xml"):
+        raise ValueError(
+            "The OpenVINO export requires the filepath to end with '.xml'. "
+            f"Got: filepath={filepath}"
+        )
 
     import openvino as ov
-    import openvino.opset15 as ov_opset
+    import openvino.opset16 as ov_opset
 
-    from keras.src.backend.openvino.core import OPENVINO_DTYPES
-    from keras.src.backend.openvino.core import OpenVINOKerasTensor
+    from keras.src.backend.openvino.ops.core import OPENVINO_DTYPES
+    from keras.src.backend.openvino.ops.core import OpenVINOKerasTensor
 
     actual_verbose = verbose if verbose is not None else True
 

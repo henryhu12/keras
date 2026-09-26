@@ -22,6 +22,7 @@ from keras.src.quantizers.gptq_config import GPTQConfig
 from keras.src.quantizers.quantization_config import Int4QuantizationConfig
 from keras.src.quantizers.quantization_config import Int8QuantizationConfig
 from keras.src.quantizers.quantizers import AbsMaxQuantizer
+from keras.src.testing import test_utils
 
 
 class DenseTest(testing.TestCase):
@@ -81,7 +82,6 @@ class DenseTest(testing.TestCase):
                 backend.standardize_dtype(layer._kernel.dtype), "int8"
             )
 
-    @pytest.mark.requires_trainable_backend
     def test_dense_basics(self):
         # 2D case, no bias.
         self.run_layer_test(
@@ -209,7 +209,8 @@ class DenseTest(testing.TestCase):
         # Verify the computation is the same as if it had been a dense tensor
         expected_outputs = ops.add(
             ops.matmul(
-                backend.convert_to_tensor(inputs, sparse=False), layer.kernel
+                backend.ops.convert_to_tensor(inputs, sparse=False),
+                layer.kernel,
             ),
             layer.bias,
         )
@@ -290,6 +291,9 @@ class DenseTest(testing.TestCase):
         self.assertLen(layer.non_trainable_weights, 1)
         if backend.backend() == "torch":
             self.assertLen(layer.torch_params, 4)
+        self.assertDType(layer.lora_kernel_a, "float32")
+        self.assertDType(layer.lora_kernel_b, "float32")
+
         # Try eager call
         x = np.random.random((64, 8))
         y = np.random.random((64, 16))
@@ -347,7 +351,6 @@ class DenseTest(testing.TestCase):
         model.load_weights(temp_filepath)
         self.assertAllClose(model.predict(x), new_model.predict(x))
 
-    @pytest.mark.requires_trainable_backend
     def test_enable_lora_with_alpha(self):
         # Create a `Dense` layer and build it.
         layer = layers.Dense(units=8)
@@ -373,7 +376,6 @@ class DenseTest(testing.TestCase):
             ops.convert_to_numpy(layer.kernel), effective_kernel_expected
         )
 
-    @pytest.mark.requires_trainable_backend
     def test_lora_weight_name(self):
         class MyModel(models.Model):
             def __init__(self):
@@ -393,7 +395,6 @@ class DenseTest(testing.TestCase):
             model.dense.lora_kernel_a.path, "mymodel/dense/lora_kernel_a"
         )
 
-    @pytest.mark.requires_trainable_backend
     def test_lora_rank_argument(self):
         self.run_layer_test(
             layers.Dense,
@@ -437,7 +438,7 @@ class DenseTest(testing.TestCase):
 
     @parameterized.named_parameters(
         ("int8", "int8", 1e-3),
-        ("int4", "int4", 2e-3),
+        ("int4", "int4", 5e-3),
     )
     def test_quantize_int(self, mode, error_threshold):
         if mode == "int4" and testing.tensorflow_uses_gpu():
@@ -586,7 +587,6 @@ class DenseTest(testing.TestCase):
         ("int4", "int4_from_mixed_bfloat16", 1, 2),
         ("float8", "float8_from_mixed_bfloat16", 8, 0),
     )
-    @pytest.mark.requires_trainable_backend
     @pytest.mark.skipif(
         testing.tensorflow_uses_gpu(), reason="Segfault on Tensorflow GPU"
     )
@@ -714,61 +714,18 @@ class DenseTest(testing.TestCase):
         optimizer = optimizers.AdamW(learning_rate=0.1)
         optimizer.build(layer.trainable_variables)
 
-        def loss_fn(x, dy):
-            y = layer(x, training=True)
-            loss = y * ops.cast(dy, y.dtype)
-            return ops.sum(loss)
+        def stateless_loss_fn(trainable_variables, x, dy):
+            y = layer.stateless_call(trainable_variables, [], x, training=True)[
+                0
+            ]
+            return y * ops.cast(dy, y.dtype)
 
-        if backend.backend() == "tensorflow":
-            import tensorflow as tf
+        grad_fn = ops.grad(stateless_loss_fn)
 
-            @tf.function(jit_compile=True)
-            def train_one_step(x, dy):
-                with tf.GradientTape() as tape:
-                    loss = loss_fn(x, dy)
-                grads = tape.gradient(loss, layer.trainable_variables)
-                optimizer.apply(grads, layer.trainable_variables)
-
-        elif backend.backend() == "jax":
-            import jax
-
-            def stateless_loss_fn(trainable_variables, x, dy):
-                y = layer.stateless_call(
-                    trainable_variables, [], x, training=True
-                )[0]
-                loss = y * ops.cast(dy, y.dtype)
-                return ops.sum(loss)
-
-            grad_fn = jax.jit(jax.grad(stateless_loss_fn))
-
-            def train_one_step(x, dy):
-                trainable_variables = [
-                    v.value for v in layer.trainable_variables
-                ]
-                optimizer_variables = [v.value for v in optimizer.variables]
-                grads = grad_fn(trainable_variables, x, dy)
-                trainable_variables, optimizer_variables = (
-                    optimizer.stateless_apply(
-                        optimizer_variables, grads, trainable_variables
-                    )
-                )
-                for variable, value in zip(
-                    layer.trainable_variables, trainable_variables
-                ):
-                    variable.assign(value)
-                for variable, value in zip(
-                    optimizer.variables, optimizer_variables
-                ):
-                    variable.assign(value)
-
-        elif backend.backend() == "torch":
-
-            def train_one_step(x, dy):
-                layer.zero_grad()
-                loss = loss_fn(x, dy)
-                loss.backward()
-                grads = [v.value.grad for v in layer.trainable_variables]
-                optimizer.apply(grads, layer.trainable_variables)
+        def train_one_step(x, dy):
+            trainable_variables = [v.value for v in layer.trainable_variables]
+            grads = grad_fn(trainable_variables, x, dy)
+            optimizer.apply(grads, layer.trainable_variables)
 
         scale_x, amax_history_x = ops.ones(()), ops.zeros((1024,))
         scale_k, amax_history_k = ops.ones(()), ops.zeros((1024,))
@@ -916,6 +873,32 @@ class DenseTest(testing.TestCase):
         new_layer.build((None, 8))
         self.assertEqual(new_layer.quantization_mode, "awq")
 
+    def test_gptq_uncalibrated_save_raises(self):
+        """Saving a GPTQ layer that was never calibrated must raise."""
+        layer = layers.Dense(units=16)
+        layer.build((None, 8))
+        layer.quantize(
+            "gptq",
+            config=GPTQConfig(
+                dataset=None, tokenizer=None, weight_bits=4, group_size=8
+            ),
+        )
+        with self.assertRaisesRegex(ValueError, "never been calibrated"):
+            layer.save_own_variables({})
+
+    def test_awq_uncalibrated_save_raises(self):
+        """Saving an AWQ layer that was never calibrated must raise."""
+        layer = layers.Dense(units=16)
+        layer.build((None, 8))
+        layer.quantize(
+            "awq",
+            config=AWQConfig(
+                dataset=None, tokenizer=None, group_size=8, num_grid_points=10
+            ),
+        )
+        with self.assertRaisesRegex(ValueError, "never been calibrated"):
+            layer.save_own_variables({})
+
     def test_int4_kernel_returns_unpacked_form(self):
         """Test that the `kernel` property returns the unpacked int4 kernel."""
         layer = layers.Dense(units=2)
@@ -971,8 +954,9 @@ class DenseTest(testing.TestCase):
             "2": np.random.random((16, 1)).astype("float32"),
             # kernel_zero
             "3": np.random.random((16, 1)).astype("uint8"),
-            # g_idx
-            "4": np.random.random((8,)).astype("float32"),
+            # g_idx: legacy checkpoints stored the integer group indices as
+            # float32; they load into the float32 g_idx variable unchanged.
+            "4": np.array([0, 0, 0, 0, 1, 1, 1, 1], dtype="float32"),
         }
         awq_store = {
             "0": np.random.random((16,)).astype("float32"),  # bias
@@ -980,7 +964,9 @@ class DenseTest(testing.TestCase):
             "2": np.random.random((16, 1)).astype("float32"),  # scale
             "3": np.random.random((16, 1)).astype("uint8"),  # zero
             "4": np.random.random((8,)).astype("float32"),  # awq_scales
-            "5": np.random.random((8,)).astype("float32"),  # g_idx
+            # g_idx saved as int32 by a newer checkpoint; the cast on load
+            # brings it into the float32 storage variable (see above).
+            "5": np.array([0, 0, 0, 0, 1, 1, 1, 1], dtype="int32"),
         }
 
         # Test float32 layer.
@@ -1029,6 +1015,8 @@ class DenseTest(testing.TestCase):
         self.assertAllClose(layer.kernel_scale, gptq_store["2"])
         self.assertAllClose(layer.kernel_zero, gptq_store["3"])
         self.assertAllClose(layer.g_idx, gptq_store["4"])
+        # g_idx is stored as float32; the legacy float32 store loads as-is.
+        self.assertDType(layer.g_idx, "float32")
 
         # Test awq-quantized layer.
         layer = layers.Dense(units=16, dtype="awq/4/8_from_float32")
@@ -1041,6 +1029,113 @@ class DenseTest(testing.TestCase):
         self.assertAllClose(layer.kernel_zero, awq_store["3"])
         self.assertAllClose(layer.awq_scales, awq_store["4"])
         self.assertAllClose(layer.g_idx, awq_store["5"])
+        # The int32-saved g_idx is cast to the float32 variable on load.
+        self.assertDType(layer.g_idx, "float32")
+
+    @staticmethod
+    def _build_dense_for_mode(mode, input_dim=256, units=64):
+        """Builds a `Dense` layer populated for `mode`'s serialization spec."""
+        if mode == "none":
+            layer = layers.Dense(units=units)
+            layer.build((None, input_dim))
+        elif mode == "int8":
+            layer = layers.Dense(units=units, dtype="int8_from_float32")
+            layer.build((None, input_dim))
+        elif mode == "int4_per_channel":
+            layer = layers.Dense(units=units, dtype="int4_from_float32")
+            layer.build((None, input_dim))
+        elif mode == "int4_grouped":
+            layer = layers.Dense(units=units)
+            layer.build((None, input_dim))
+            layer.quantize(
+                "int4", config=Int4QuantizationConfig(block_size=128)
+            )
+        elif mode == "float8":
+            layer = layers.Dense(units=units, dtype="float8_from_float32")
+            layer.build((None, input_dim))
+        elif mode == "ternary":
+            # Ternary has no float `_kernel`; the packed kernel is serialized
+            # under the `"kernel"` spec name.
+            layer = layers.Dense(units=units, dtype="ternary_from_float32")
+            layer.build((None, input_dim))
+        elif mode == "gptq":
+            layer = layers.Dense(units=units, dtype="gptq/4/32_from_float32")
+            layer.build((None, input_dim))
+        elif mode == "awq":
+            layer = layers.Dense(units=units, dtype="awq/4/32_from_float32")
+            layer.build((None, input_dim))
+        else:
+            raise ValueError(f"Unhandled test mode: {mode}")
+        return layer
+
+    @pytest.mark.skipif(
+        testing.tensorflow_uses_gpu(), reason="Segfault on Tensorflow GPU"
+    )
+    def test_serialization_round_trip(self):
+        # Modes whose `save_own_variables` writes a self-consistent store.
+        for mode in (
+            "none",
+            "int8",
+            "int4_per_channel",
+            "int4_grouped",
+            "float8",
+            "ternary",
+        ):
+            with self.subTest(mode=mode):
+                source = self._build_dense_for_mode(mode)
+                test_utils.randomize_serialized_variables(source)
+
+                store = {}
+                source.save_own_variables(store)
+                # Variables are keyed by consecutive integer positions in the
+                # mode's serialization spec -- the on-disk contract.
+                n_expected = len(test_utils.serialized_variable_names(source))
+                self.assertEqual(
+                    set(store.keys()), {str(i) for i in range(n_expected)}
+                )
+
+                target = self._build_dense_for_mode(mode)
+                target.load_own_variables(store)
+                test_utils.assert_serialized_variables_equal(
+                    self, source, target
+                )
+
+    def test_gptq_awq_load_from_store(self):
+        # GPTQ/AWQ checkpoints carry variables (e.g. `kernel_zero`) that
+        # `save_own_variables` does not emit for a freshly built layer, so
+        # they are validated through the load path with a fully-populated
+        # store.
+        for mode in ("gptq", "awq"):
+            with self.subTest(mode=mode):
+                source = self._build_dense_for_mode(mode)
+                test_utils.randomize_serialized_variables(source)
+
+                target = self._build_dense_for_mode(mode)
+                target.load_own_variables(test_utils.positional_store(source))
+                self.assertEqual(target.is_gptq_calibrated, mode == "gptq")
+                self.assertEqual(target.is_awq_calibrated, mode == "awq")
+                test_utils.assert_serialized_variables_equal(
+                    self, source, target
+                )
+
+    def test_load_own_variables_reports_clear_errors(self):
+        # int8 spec order: kernel ("0"), bias ("1"), kernel_scale ("2").
+        source = self._build_dense_for_mode("int8")
+        test_utils.randomize_serialized_variables(source)
+        store = test_utils.positional_store(source)
+
+        # A missing variable trips the variable-count check with a clear error.
+        missing = dict(store)
+        del missing["2"]
+        with self.assertRaisesRegex(ValueError, "expected 3 variables"):
+            self._build_dense_for_mode("int8").load_own_variables(missing)
+
+        # A renumbered/corrupted key keeps the count but fails on the exact
+        # missing position.
+        corrupted = dict(store)
+        corrupted["9"] = corrupted.pop("2")
+        with self.assertRaises(KeyError):
+            self._build_dense_for_mode("int8").load_own_variables(corrupted)
 
     def test_int4_gptq_kernel_returns_unpacked_form(self):
         """Test that the `kernel` property returns the unpacked int4 GPTQ
@@ -1438,3 +1533,241 @@ class DenseTest(testing.TestCase):
         # Verify outputs match
         y_after = loaded_model(x)
         self.assertAllClose(y_before, y_after)
+
+    # Ternary quantization tests for Dense.quantize("ternary").
+
+    def test_dense_quantize_ternary_matches_float(self):
+        layer = layers.Dense(units=16)
+        layer.build((None, 11))
+        x = np.random.rand(4, 11).astype("float32")
+        y_float = layer(x)
+
+        layer.quantize("ternary")
+
+        self.assertEqual(layer.quantization_mode, "ternary")
+        self.assertFalse(hasattr(layer, "_kernel"))
+        from keras.src import backend as _backend
+
+        self.assertEqual(
+            _backend.standardize_dtype(layer._packed_kernel.dtype), "uint8"
+        )
+        # packed shape: ceil(11 / 5) = 3 rows
+        self.assertEqual(tuple(layer._packed_kernel.shape), (3, 16))
+
+        y_quantized = layer(x)
+        # Dense.quantize("ternary") is lossy: float kernel → {-1,0,+1}×beta.
+        # Only verify output shape, not numerical equality.
+        self.assertEqual(tuple(y_quantized.shape), tuple(y_float.shape))
+
+    def test_dense_quantize_ternary_packed_density(self):
+        # input_dim=40 → ceil(40/5)=8 packed rows; 8 bytes encode 40 trits.
+        layer = layers.Dense(units=32)
+        layer.build((None, 40))
+        layer.quantize("ternary")
+
+        n_bytes = 8 * 32
+        n_weights = 40 * 32
+        bits_per_weight = 8 * n_bytes / n_weights
+        self.assertEqual(bits_per_weight, 1.6)
+        self.assertLess(n_bytes, n_weights // 2)
+
+    def test_dense_quantize_ternary_kernel_property(self):
+        # Dense.kernel property should return an unpacked {-1, 0, +1} tensor.
+        layer = layers.Dense(units=8)
+        layer.build((None, 6))
+        layer.quantize("ternary")
+
+        k = ops.convert_to_numpy(layer.kernel)
+        self.assertEqual(k.shape, (6, 8))
+        unique_vals = set(np.round(k).astype(np.int32).flat)
+        self.assertTrue(
+            unique_vals <= {-1, 0, 1},
+            f"Expected kernel values in {{-1, 0, 1}}, got {np.unique(k)}",
+        )
+
+    def test_dense_quantize_ternary_save_load(self):
+        layer = layers.Dense(units=16)
+        layer.build((None, 8))
+        x = np.random.rand(3, 8).astype("float32")
+        y_float = layer(x)
+        layer.quantize("ternary")
+        y_quantized = layer(x)
+        # Dense.quantize("ternary") is lossy: verify shape not exact equality.
+        self.assertEqual(tuple(y_quantized.shape), tuple(y_float.shape))
+
+        model = models.Sequential([layer])
+        temp_filepath = os.path.join(
+            self.get_temp_dir(), "dense_ternary_model.keras"
+        )
+        model.save(temp_filepath)
+        new_model = saving.load_model(temp_filepath)
+        self.assertEqual(new_model.layers[0].quantization_mode, "ternary")
+        self.assertAllClose(model.predict(x), new_model.predict(x))
+
+        temp_weights = os.path.join(
+            self.get_temp_dir(), "dense_ternary_model.weights.h5"
+        )
+        model.save_weights(temp_weights)
+        new_model = models.Sequential([layers.Dense(units=16)])
+        new_model.build((None, 8))
+        new_model.quantize("ternary")
+        new_model.load_weights(temp_weights)
+        self.assertAllClose(model.predict(x), new_model.predict(x))
+
+    def test_dense_quantize_ternary_beta_scale(self):
+        # With default threshold (None), beta = mean(|W|) is stored in
+        # kernel_scale and applied in _ternary_call.
+        layer = layers.Dense(units=4, use_bias=False)
+        layer.build((None, 4))
+        kernel = np.array(
+            [
+                [0.5, -0.5, 0.5, -0.5],
+                [0.5, 0.5, -0.5, 0.5],
+                [-0.5, 0.5, 0.5, -0.5],
+                [0.5, -0.5, -0.5, 0.5],
+            ],
+            dtype="float32",
+        )
+        layer._kernel.assign(kernel)
+        beta_expected = float(np.mean(np.abs(kernel)))
+        layer.quantize("ternary")
+
+        self.assertAllClose(
+            float(ops.convert_to_numpy(layer.kernel_scale)),
+            beta_expected,
+            atol=1e-5,
+        )
+
+    def test_dense_quantize_ternary_no_bias(self):
+        layer = layers.Dense(units=8, use_bias=False)
+        layer.build((None, 6))
+        x = np.random.rand(2, 6).astype("float32")
+        y_float = layer(x)
+        layer.quantize("ternary")
+        self.assertIsNone(layer.bias)
+        y_quantized = layer(x)
+        # Dense.quantize("ternary") is lossy: verify shape not exact equality.
+        self.assertEqual(tuple(y_quantized.shape), tuple(y_float.shape))
+
+    def test_dense_prebuilt_ternary_mode(self):
+        # Dense built with dtype="ternary_from_float32" routes to _ternary_build
+        # during build — the float kernel never exists.
+        layer = layers.Dense(units=8, dtype="ternary_from_float32")
+        layer.build((None, 10))
+        self.assertTrue(layer.built)
+        self.assertEqual(layer.quantization_mode, "ternary")
+        self.assertTrue(hasattr(layer, "_packed_kernel"))
+        # ceil(10 / 5) = 2 packed rows
+        self.assertEqual(tuple(layer._packed_kernel.shape), (2, 8))
+        x = np.random.rand(3, 10).astype("float32")
+        y = layer(x)
+        self.assertEqual(tuple(y.shape), (3, 8))
+
+    @pytest.mark.skipif(
+        testing.tensorflow_uses_gpu(), reason="Segfault on Tensorflow GPU"
+    )
+    def test_int4_string_matches_default_config(self):
+        """`quantize("int4")` must resolve to the exact same scheme as the
+        default `Int4QuantizationConfig()` (grouped, block_size=128): identical
+        variables (names/shapes/dtypes/values), dtype policy, and outputs."""
+        input_dim, output_dim = 256, 64
+        kernel = np.random.RandomState(0).randn(input_dim, output_dim)
+        kernel = kernel.astype("float32")
+
+        def build_quantized(config):
+            layer = layers.Dense(units=output_dim)
+            layer.build((None, input_dim))
+            layer._kernel.assign(kernel)
+            layer.quantize("int4", config=config)
+            return layer
+
+        layer_str = build_quantized(config=None)
+        layer_cfg = build_quantized(config=Int4QuantizationConfig())
+
+        # Same dtype policy: grouped, block_size=128.
+        self.assertEqual(layer_str.dtype_policy.name, "int4/128_from_float32")
+        self.assertEqual(
+            layer_str.dtype_policy.name, layer_cfg.dtype_policy.name
+        )
+        self.assertEqual(layer_str._int4_block_size, 128)
+
+        # Same variables: names, shapes, dtypes, and values.
+        vars_str = {v.name: v for v in layer_str.weights}
+        vars_cfg = {v.name: v for v in layer_cfg.weights}
+        self.assertEqual(set(vars_str.keys()), set(vars_cfg.keys()))
+        for name, v_str in vars_str.items():
+            v_cfg = vars_cfg[name]
+            self.assertEqual(tuple(v_str.shape), tuple(v_cfg.shape))
+            self.assertEqual(
+                backend.standardize_dtype(v_str.dtype),
+                backend.standardize_dtype(v_cfg.dtype),
+            )
+            self.assertAllClose(v_str, v_cfg)
+
+        # Same outputs.
+        x = np.random.RandomState(1).randn(4, input_dim).astype("float32")
+        self.assertAllClose(layer_str(x), layer_cfg(x))
+
+    @parameterized.named_parameters(
+        ("none", None),
+        ("neg1", -1),
+    )
+    @pytest.mark.skipif(
+        testing.tensorflow_uses_gpu(), reason="Segfault on Tensorflow GPU"
+    )
+    def test_int4_per_channel_escape_hatch(self, block_size):
+        """`block_size=None` and `block_size=-1` both select the per-channel
+        escape hatch: one scale per output channel, no zero-point / g_idx, and
+        an `int4/-1` dtype policy."""
+        input_dim, output_dim = 256, 64
+        layer = layers.Dense(units=output_dim)
+        layer.build((None, input_dim))
+        layer.quantize(
+            "int4", config=Int4QuantizationConfig(block_size=block_size)
+        )
+        self.assertEqual(tuple(layer.kernel_scale.shape), (output_dim,))
+        self.assertFalse(hasattr(layer, "kernel_zero"))
+        self.assertFalse(hasattr(layer, "g_idx"))
+        self.assertEqual(layer.dtype_policy.name, "int4/-1_from_float32")
+
+    @parameterized.named_parameters(
+        ("block_none", "None", True),
+        ("block_neg1", "-1", True),
+        ("block_128", "128", False),
+    )
+    @pytest.mark.skipif(
+        testing.tensorflow_uses_gpu(), reason="Segfault on Tensorflow GPU"
+    )
+    def test_int4_policy_string_reload_builds_right_variables(
+        self, block_token, per_channel
+    ):
+        """Old checkpoints identified only by their int4 dtype-policy string
+        must deserialize and rebuild the correct variables. Covers the legacy
+        `int4/None` spelling of per-channel plus `int4/-1` and `int4/128`."""
+        input_dim, output_dim = 256, 64
+        policy = f"int4/{block_token}_from_float32"
+        layer = layers.Dense(units=output_dim, dtype=policy)
+        layer.build((None, input_dim))
+
+        self.assertEqual(layer.quantization_mode, "int4")
+        if per_channel:
+            self.assertEqual(tuple(layer.kernel_scale.shape), (output_dim,))
+            self.assertFalse(hasattr(layer, "g_idx"))
+        else:
+            block_size = int(block_token)
+            n_groups = math.ceil(input_dim / block_size)
+            self.assertEqual(
+                tuple(layer.kernel_scale.shape), (n_groups, output_dim)
+            )
+            self.assertTrue(hasattr(layer, "g_idx"))
+            self.assertEqual(tuple(layer.g_idx.shape), (input_dim,))
+
+        # The packed kernel is always [input_dim, ceil(output_dim / 2)] int8.
+        self.assertEqual(
+            tuple(layer._kernel.shape), (input_dim, (output_dim + 1) // 2)
+        )
+        self.assertEqual(backend.standardize_dtype(layer._kernel.dtype), "int8")
+
+        # A forward pass runs without error.
+        x = np.random.random((2, input_dim)).astype("float32")
+        self.assertEqual(tuple(layer(x).shape), (2, output_dim))

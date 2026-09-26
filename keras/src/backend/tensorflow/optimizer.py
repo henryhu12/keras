@@ -21,6 +21,25 @@ class TFOptimizer(KerasAutoTrackable, base_optimizer.BaseOptimizer):
         super().__init__(*args, **kwargs)
         self._distribution_strategy = tf.distribute.get_strategy()
 
+    def add_variable(
+        self,
+        shape,
+        initializer="zeros",
+        dtype=None,
+        aggregation="none",
+        layout=None,
+        name=None,
+    ):
+        with tf.init_scope():
+            return super().add_variable(
+                shape,
+                initializer=initializer,
+                dtype=dtype,
+                aggregation=aggregation,
+                layout=layout,
+                name=name,
+            )
+
     def add_variable_from_reference(
         self, reference_variable, name=None, initializer="zeros"
     ):
@@ -170,7 +189,12 @@ class TFOptimizer(KerasAutoTrackable, base_optimizer.BaseOptimizer):
             else:
                 reduced_with_nones.append((reduced[reduced_pos], v))
                 reduced_pos += 1
-        assert reduced_pos == len(reduced), "Failed to add all gradients"
+        if reduced_pos != len(reduced):
+            raise ValueError(
+                "Internal error: Failed to add all gradients. Expected to "
+                f"process {len(reduced)} gradients, but processed "
+                f"{reduced_pos}."
+            )
         return reduced_with_nones
 
     def _overwrite_model_variables_with_average_value(
